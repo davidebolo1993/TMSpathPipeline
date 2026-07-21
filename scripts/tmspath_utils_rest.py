@@ -12640,25 +12640,557 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     return df_neural_params, pol_degree_min_resonances, pol_degree_min_F
 
 
+def create_rest_epochs_from_sx_dx_tep(
+    raw_rest,
+    json_data,
+    experiment_dir,
+    sub,
+    tmin=None,
+    tmax=None,
+    baseline=None,
+    reject_by_annotation=True,
+    resample_to_tep=False,
+    save=True,
+    note="REST_TEP_epoching"
+):
+    import json
+    import pickle
+    import re
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import mne
+    from pathlib import Path
 
+    required_keys=["mainDir","tep_sx_file","tep_dx_file"]
+    missing_keys=[key for key in required_keys if not json_data.get(key)]
 
+    if missing_keys:
+        raise KeyError(f"Parametri mancanti in json_data: {missing_keys}")
 
+    main_dir=Path(json_data["mainDir"]).expanduser().resolve()
 
+    def resolve_file(filename):
+        path=Path(filename).expanduser()
+        if not path.is_absolute():
+            path=main_dir/path
+        path=path.resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"File TEP non trovato: {path}")
+        return path
 
+    tep_sx_file=resolve_file(json_data["tep_sx_file"])
+    tep_dx_file=resolve_file(json_data["tep_dx_file"])
 
+    json_data["tep_sx_file_resolved"]=str(tep_sx_file)
+    json_data["tep_dx_file_resolved"]=str(tep_dx_file)
 
+    print(f"TEP SX: {tep_sx_file}")
+    print(f"TEP DX: {tep_dx_file}")
 
+    def extract_events_from_asc(file_path):
+        file_path=Path(file_path)
 
+        with open(file_path,"r") as file:
+            lines=file.readlines()
 
+        if len(lines)<=11:
+            raise ValueError(f"File ASC non valido: {file_path}")
 
+        metadata=lines[:11]
 
+        channel_names_line=metadata[9].rstrip("\n")
 
+        channel_names=[
+            item.strip().strip('"')
+            for item in channel_names_line.split('", "')
+        ]
 
+        dataframe=pd.read_csv(
+            file_path,
+            sep="\t",
+            decimal=",",
+            names=channel_names,
+            skiprows=11,
+            index_col=False
+        )
 
+        if "MK" not in dataframe.columns:
+            raise ValueError(f"Canale MK assente in: {file_path}")
 
+        marker=pd.to_numeric(
+            dataframe["MK"],
+            errors="coerce"
+        ).to_numpy(dtype=float)
 
+        finite_marker=marker[np.isfinite(marker)]
 
+        if finite_marker.size==0:
+            raise ValueError(f"Canale MK vuoto in: {file_path}")
 
+        values,counts=np.unique(
+            finite_marker,
+            return_counts=True
+        )
 
-    
- 
+        baseline_marker=float(values[np.argmax(counts)])
+
+        active=np.isfinite(marker)&(marker!=baseline_marker)
+
+        previous=np.concatenate([
+            np.array([False]),
+            active[:-1]
+        ])
+
+        event_samples=np.where(active&~previous)[0]
+
+        if event_samples.size==0:
+            raise ValueError(f"Nessun evento trovato nel canale MK: {file_path}")
+
+        sampling_values=[]
+
+        for line in metadata:
+            if "Sampling" in line or "sampling" in line or "Hz" in line:
+                sampling_values.extend(
+                    re.findall(r"\d+(?:[.,]\d+)?",line)
+                )
+
+        if not sampling_values:
+            sampling_values=re.findall(
+                r"\d+(?:[.,]\d+)?",
+                metadata[5]
+            )
+
+        if not sampling_values:
+            raise ValueError(
+                f"Frequenza di campionamento non trovata in: {file_path}"
+            )
+
+        sfreq=float(
+            sampling_values[-1].replace(",",".")
+        )
+
+        event_times=event_samples.astype(float)/sfreq
+
+        return {
+            "event_times":event_times,
+            "event_samples":event_samples.astype(int),
+            "event_codes":np.ones(len(event_samples),dtype=int),
+            "sfreq":sfreq,
+            "first_samp":0,
+            "source":"ASC_MK"
+        }
+
+    def extract_events_from_edf(file_path):
+        file_path=Path(file_path)
+
+        raw_tep=mne.io.read_raw_edf(
+            file_path,
+            preload=False,
+            verbose=False
+        )
+
+        events,event_id=mne.events_from_annotations(
+            raw_tep,
+            verbose=False
+        )
+
+        if len(events)==0:
+            asc_path=file_path.with_suffix(".asc")
+
+            if not asc_path.exists():
+                asc_matches=list(
+                    file_path.parent.glob(
+                        f"{file_path.stem}*.asc"
+                    )
+                )
+
+                asc_matches=[
+                    path for path in asc_matches
+                    if "onlyData" not in path.stem
+                ]
+
+                if asc_matches:
+                    asc_path=asc_matches[0]
+
+            if asc_path.exists():
+                print(
+                    f"Nessuna annotazione EDF in {file_path.name}; "
+                    f"uso MK da {asc_path.name}"
+                )
+                return extract_events_from_asc(asc_path)
+
+            raise ValueError(
+                f"Nessun evento nelle annotazioni EDF e nessun ASC associato: "
+                f"{file_path}"
+            )
+
+        sfreq=float(raw_tep.info["sfreq"])
+        first_samp=int(raw_tep.first_samp)
+
+        event_times=(
+            events[:,0].astype(float)-first_samp
+        )/sfreq
+
+        return {
+            "event_times":event_times,
+            "event_samples":events[:,0].astype(int),
+            "event_codes":events[:,2].astype(int),
+            "sfreq":sfreq,
+            "first_samp":first_samp,
+            "source":"EDF_annotations",
+            "event_id":event_id
+        }
+
+    def extract_events(file_path):
+        suffix=file_path.suffix.lower()
+
+        if suffix==".edf":
+            return extract_events_from_edf(file_path)
+
+        if suffix==".asc":
+            return extract_events_from_asc(file_path)
+
+        raise ValueError(
+            f"Formato TEP non supportato: {file_path.suffix}. "
+            "Usare EDF oppure ASC."
+        )
+
+    tep_sx=extract_events(tep_sx_file)
+    tep_dx=extract_events(tep_dx_file)
+
+    if tmin is None:
+        tmin=float(json_data["epochs_timewindow_min"])
+    else:
+        tmin=float(tmin)
+
+    if tmax is None:
+        tmax=float(json_data["epochs_timewindow_max"])
+    else:
+        tmax=float(tmax)
+
+    if tmin>=tmax:
+        raise ValueError(f"Finestra non valida: tmin={tmin}, tmax={tmax}")
+
+    if baseline is None:
+        baseline_tmin=json_data.get("baseline_cor_tmin")
+        baseline_tmax=json_data.get("baseline_cor_tmax")
+
+        if baseline_tmin is not None and baseline_tmax is not None:
+            baseline=(
+                float(baseline_tmin),
+                float(baseline_tmax)
+            )
+
+    if baseline is not None:
+        baseline=(
+            max(float(baseline[0]),tmin),
+            min(float(baseline[1]),tmax)
+        )
+
+        if baseline[0]>baseline[1]:
+            print(
+                f"Baseline {baseline} fuori dalla finestra "
+                f"{tmin}–{tmax}; baseline disattivata"
+            )
+            baseline=None
+
+    raw_in=raw_rest.copy().pick("eeg")
+    raw_in.load_data()
+
+    rest_sfreq=float(raw_in.info["sfreq"])
+    rest_first_samp=int(raw_in.first_samp)
+    rest_last_samp=int(raw_in.first_samp+raw_in.n_times-1)
+
+    experiment_dir=Path(experiment_dir).expanduser().resolve()
+    out_dir=experiment_dir/"5.Extra"/"FE"/note
+    pkl_dir=experiment_dir/"7.pkls"
+
+    out_dir.mkdir(parents=True,exist_ok=True)
+    pkl_dir.mkdir(parents=True,exist_ok=True)
+
+    def create_side_epochs(tep_info,side,event_code):
+        event_times=np.asarray(
+            tep_info["event_times"],
+            dtype=float
+        )
+
+        tep_samples=np.asarray(
+            tep_info["event_samples"],
+            dtype=int
+        )
+
+        tep_codes=np.asarray(
+            tep_info["event_codes"],
+            dtype=int
+        )
+
+        rest_samples=(
+            np.rint(event_times*rest_sfreq).astype(int)
+            +rest_first_samp
+        )
+
+        epoch_start_samples=(
+            np.rint(rest_samples+tmin*rest_sfreq)
+            .astype(int)
+        )
+
+        epoch_stop_samples=(
+            np.rint(rest_samples+tmax*rest_sfreq)
+            .astype(int)
+        )
+
+        within_bounds=(
+            (epoch_start_samples>=rest_first_samp)
+            &(epoch_stop_samples<=rest_last_samp)
+        )
+
+        mapping=pd.DataFrame({
+            "side":side,
+            "tep_event_index":np.arange(len(event_times),dtype=int),
+            "tep_event_sample":tep_samples,
+            "tep_event_code":tep_codes,
+            "tep_event_time_sec":event_times,
+            "tep_sfreq":float(tep_info["sfreq"]),
+            "tep_event_source":str(tep_info["source"]),
+            "rest_event_sample":rest_samples,
+            "rest_epoch_start_sample":epoch_start_samples,
+            "rest_epoch_stop_sample":epoch_stop_samples,
+            "within_rest_bounds":within_bounds
+        })
+
+        valid_mapping=mapping.loc[within_bounds].copy()
+
+        if valid_mapping.empty:
+            raise ValueError(
+                f"Nessun evento TEP {side} ricade interamente "
+                "nel continuo REST"
+            )
+
+        events_rest=np.column_stack([
+            valid_mapping["rest_event_sample"].to_numpy(dtype=int),
+            np.zeros(len(valid_mapping),dtype=int),
+            np.full(len(valid_mapping),event_code,dtype=int)
+        ])
+
+        epochs=mne.Epochs(
+            raw_in,
+            events_rest,
+            event_id={f"TEP_{side}":event_code},
+            tmin=tmin,
+            tmax=tmax,
+            baseline=baseline,
+            detrend=None,
+            preload=True,
+            reject_by_annotation=reject_by_annotation,
+            event_repeated="drop",
+            verbose=True
+        )
+
+        selected_rows=valid_mapping.iloc[
+            epochs.selection
+        ]["tep_event_index"].astype(int).tolist()
+
+        mapping["kept_in_epochs"]=(
+            mapping["tep_event_index"].isin(selected_rows)
+        )
+
+        mapping["status"]=np.where(
+            ~mapping["within_rest_bounds"],
+            "outside_rest_bounds",
+            np.where(
+                mapping["kept_in_epochs"],
+                "kept",
+                "rejected_BAD_or_repeated"
+            )
+        )
+
+        if (
+            resample_to_tep
+            and not np.isclose(
+                epochs.info["sfreq"],
+                float(tep_info["sfreq"])
+            )
+        ):
+            epochs.resample(
+                float(tep_info["sfreq"])
+            )
+
+        return epochs,mapping
+
+    epochs_sx,mapping_sx=create_side_epochs(
+        tep_sx,
+        "SX",
+        901
+    )
+
+    epochs_dx,mapping_dx=create_side_epochs(
+        tep_dx,
+        "DX",
+        902
+    )
+
+    evoked_sx=epochs_sx.average()
+    evoked_dx=epochs_dx.average()
+
+    mapping=pd.concat(
+        [mapping_sx,mapping_dx],
+        ignore_index=True
+    )
+
+    if save:
+        epochs_sx.save(
+            out_dir/f"{sub}_REST_TEP_SX-epo.fif",
+            overwrite=True
+        )
+
+        epochs_dx.save(
+            out_dir/f"{sub}_REST_TEP_DX-epo.fif",
+            overwrite=True
+        )
+
+        evoked_sx.save(
+            out_dir/f"{sub}_REST_TEP_SX-ave.fif",
+            overwrite=True
+        )
+
+        evoked_dx.save(
+            out_dir/f"{sub}_REST_TEP_DX-ave.fif",
+            overwrite=True
+        )
+
+        with open(
+            pkl_dir/f"{sub}_REST_TEP_SX_epochs.pkl",
+            "wb"
+        ) as file:
+            pickle.dump(epochs_sx,file)
+
+        with open(
+            pkl_dir/f"{sub}_REST_TEP_DX_epochs.pkl",
+            "wb"
+        ) as file:
+            pickle.dump(epochs_dx,file)
+
+        with open(
+            pkl_dir/f"{sub}_REST_TEP_SX_evoked.pkl",
+            "wb"
+        ) as file:
+            pickle.dump(evoked_sx,file)
+
+        with open(
+            pkl_dir/f"{sub}_REST_TEP_DX_evoked.pkl",
+            "wb"
+        ) as file:
+            pickle.dump(evoked_dx,file)
+
+        mapping.to_csv(
+            out_dir/f"{sub}_REST_TEP_event_mapping.csv",
+            index=False
+        )
+
+        figure=evoked_sx.plot(
+            spatial_colors=True,
+            show=False
+        )
+        figure.savefig(
+            out_dir/f"{sub}_REST_TEP_SX_evoked.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+        plt.close(figure)
+
+        figure=evoked_dx.plot(
+            spatial_colors=True,
+            show=False
+        )
+        figure.savefig(
+            out_dir/f"{sub}_REST_TEP_DX_evoked.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+        plt.close(figure)
+
+        figure=evoked_sx.plot_topo(
+            show=False
+        )
+        figure.savefig(
+            out_dir/f"{sub}_REST_TEP_SX_topo.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+        plt.close(figure)
+
+        figure=evoked_dx.plot_topo(
+            show=False
+        )
+        figure.savefig(
+            out_dir/f"{sub}_REST_TEP_DX_topo.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+        plt.close(figure)
+
+    json_data["rest_tep_epoching_done"]=True
+    json_data["rest_tep_sx_file"]=str(tep_sx_file)
+    json_data["rest_tep_dx_file"]=str(tep_dx_file)
+    json_data["rest_tep_sx_event_source"]=str(tep_sx["source"])
+    json_data["rest_tep_dx_event_source"]=str(tep_dx["source"])
+    json_data["rest_tep_sx_original_events"]=int(
+        len(tep_sx["event_times"])
+    )
+    json_data["rest_tep_dx_original_events"]=int(
+        len(tep_dx["event_times"])
+    )
+    json_data["rest_tep_sx_epochs_kept"]=int(len(epochs_sx))
+    json_data["rest_tep_dx_epochs_kept"]=int(len(epochs_dx))
+    json_data["rest_tep_sx_epochs_rejected"]=int(
+        len(tep_sx["event_times"])-len(epochs_sx)
+    )
+    json_data["rest_tep_dx_epochs_rejected"]=int(
+        len(tep_dx["event_times"])-len(epochs_dx)
+    )
+    json_data["rest_tep_epoch_tmin"]=float(tmin)
+    json_data["rest_tep_epoch_tmax"]=float(tmax)
+    json_data["rest_tep_epoch_baseline"]=baseline
+    json_data["rest_tep_reject_by_annotation"]=bool(
+        reject_by_annotation
+    )
+    json_data["rest_tep_resample_to_tep"]=bool(
+        resample_to_tep
+    )
+    json_data["rest_tep_sx_sfreq"]=float(
+        epochs_sx.info["sfreq"]
+    )
+    json_data["rest_tep_dx_sfreq"]=float(
+        epochs_dx.info["sfreq"]
+    )
+    json_data["rest_tep_epoching_dir"]=str(out_dir)
+    json_data["rest_tep_event_mapping_csv"]=str(
+        out_dir/f"{sub}_REST_TEP_event_mapping.csv"
+    )
+
+    with open(
+        experiment_dir/f"{sub}_pars.json",
+        "w"
+    ) as file:
+        json.dump(
+            make_json_serializable(json_data),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print(f"✅ REST TEP SX: {len(epochs_sx)} epoche")
+    print(f"✅ REST TEP DX: {len(epochs_dx)} epoche")
+    print(f"Finestra: {tmin} → {tmax} s")
+    print(f"Baseline: {baseline}")
+    print(f"Risultati: {out_dir}")
+
+    return (
+        epochs_sx,
+        epochs_dx,
+        evoked_sx,
+        evoked_dx,
+        mapping,
+        json_data
+    )

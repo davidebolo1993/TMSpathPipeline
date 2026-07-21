@@ -1,6 +1,7 @@
 # folder to ignore
 data/
 old/
+NOTES
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
