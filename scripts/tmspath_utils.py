@@ -169,6 +169,85 @@ def import_modules():
     
     return date, start_time
 
+
+def setup_tep_analysis(json_data):
+    from pathlib import Path
+
+    subject=str(
+        json_data["subject"]
+    ).strip().upper()
+
+    hemisphere=str(
+        json_data["emispheric_stimulation"]
+    ).strip().upper()
+
+    seed_map={
+        "SX":["AF3","F3","Fz","FC1"],
+        "DX":["Fz","AF4","F4","FC2"]
+    }
+
+    if hemisphere not in seed_map:
+        raise ValueError(
+            "emispheric_stimulation deve essere 'SX' oppure 'DX'"
+        )
+
+    json_data["subject"]=subject
+    json_data["subject_id"]=subject
+    json_data["emispheric_stimulation"]=hemisphere
+    json_data["seedChans"]=seed_map[hemisphere]
+
+    main_dir=Path(
+        json_data["mainDir"]
+    ).expanduser().resolve()
+
+    subject_dir=main_dir/subject
+
+    fileName=str(
+        subject_dir
+        /f"{subject}EMISFERO{hemisphere}"
+    )
+
+    json_data.pop(
+        "experiment_dir",
+        None
+    )
+
+    json_data,experiment_dir,sub=directorySetup(
+        json_data
+    )
+
+    experiment_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
+    json_data["analysis_id"]=experiment_dir.name
+    json_data["input_file_stem"]=fileName
+    json_data["output_directory"]=str(
+        experiment_dir
+    )
+
+    savePath=str(
+        subject_dir
+    )
+
+    print("Subject:",sub)
+    print("Hemisphere:",hemisphere)
+    print("Seed channels:",json_data["seedChans"])
+    print("Subject directory:",subject_dir)
+    print("Subject directory exists:",subject_dir.exists())
+    print("Input stem:",fileName)
+    print("Output directory:",experiment_dir)
+    print("Analysis ID:",json_data["analysis_id"])
+
+    return (
+        json_data,
+        experiment_dir,
+        sub,
+        fileName,
+        savePath
+    )
+
+
 def make_json_serializable(d):
     new_d = {}
     for k, v in d.items():
@@ -182,51 +261,184 @@ def make_json_serializable(d):
     return new_d
 
 def directorySetup(json_data):
-    import os, json
+    import os
+    import json
     from pathlib import Path
+    from datetime import datetime
 
-    extraNote = f"{json_data['detrend_typeOffsetRise']}_{json_data['detrend_typeOffsetDecay']}"
-    sub = json_data['subject']
+    sub=str(json_data["subject"]).strip().upper()
+    pipeline_info=load_pipeline_version()
+    json_data.update(
+        pipeline_info
+    )
+    
+    hemisphere=str(
+        json_data.get(
+            "emispheric_stimulation",
+            json_data.get(
+                "hemisphere",
+                json_data.get(
+                    "stimulation_side",
+                    ""
+                )
+            )
+        )
+    ).strip().upper()
 
-    # === NUOVA LOGICA ===
-    if "experiment_dir" in json_data and json_data["experiment_dir"]:
-        experiment_dir = json_data["experiment_dir"]
-        print(f"📌 Using provided experiment_dir: {experiment_dir}")
-    else:
-        fit_letter = str(json_data['detrend_fitConstraint'])[0]
-        offset_letter = str(json_data['detrend_offsetCorrectionType'])[0]
-        date = json_data['date']
+    hemisphere=hemisphere.replace(" ","").replace("_","")
 
-        experiment_dir = os.path.join(
-            json_data['mainDir'],
-            f"{date}_{fit_letter}_{offset_letter}_{extraNote}"
+    aliases={
+        "DX":"DX",
+        "RIGHT":"DX",
+        "R":"DX",
+        "DESTRA":"DX",
+        "SX":"SX",
+        "LEFT":"SX",
+        "L":"SX",
+        "SINISTRA":"SX"
+    }
+
+    hemisphere=aliases.get(
+        hemisphere,
+        hemisphere
+    )
+
+    if hemisphere not in ["DX","SX"]:
+        raise ValueError(
+            "Impostare json_data['emispheric_stimulation'] "
+            "a 'DX' oppure 'SX'."
         )
 
-        print(f"📁 Generated experiment_dir: {experiment_dir}")
+    timestamp=datetime.now().strftime("%Y%m%d%H%M%S")
+    recording_name=f"{sub}{hemisphere}"
 
-    # === subdirs ===
-    subdirs = [
-        '1.basic',
-        os.path.join('2.detrend'),
-        os.path.join('2.detrend', 'examples'),
-        os.path.join('3.trials', 'preDetrend'),
-        os.path.join('3.trials', 'postDetrend'),
-        '4.postICA',
-        os.path.join('5.Extra'),
-        os.path.join('5.Extra', 'FE'),
-        '6.pkls',
-        '7.FOOOF'
+    json_data["subject"]=sub
+    json_data["subject_id"]=sub
+    json_data["emispheric_stimulation"]=hemisphere
+    json_data["recording_name"]=recording_name
+    json_data["pipeline_timestamp"]=timestamp
+
+    if json_data.get("experiment_dir"):
+        experiment_dir=str(
+            Path(
+                json_data["experiment_dir"]
+            ).expanduser().resolve()
+        )
+
+        print(
+            f"📌 Using provided experiment_dir: "
+            f"{experiment_dir}"
+        )
+
+    else:
+        main_dir=Path(
+            json_data["mainDir"]
+        ).expanduser().resolve()
+
+        subject_dir=main_dir/sub
+
+        experiment_dir=str(
+            subject_dir/f"{timestamp}_{recording_name}"
+        )
+
+        print(
+            f"📁 Generated TEP experiment_dir: "
+            f"{experiment_dir}"
+        )
+
+    subdirs=[
+        "1.basic",
+        "2.detrend",
+        os.path.join("2.detrend","examples"),
+        os.path.join("3.trials","preDetrend"),
+        os.path.join("3.trials","postDetrend"),
+        "4.postICA",
+        "5.Extra",
+        os.path.join("5.Extra","FE"),
+        os.path.join("5.Extra","FE","PCIst"),
+        os.path.join("5.Extra","FE","Fingerprint"),
+        "6.pkls",
+        "7.FOOOF"
     ]
 
-    os.makedirs(experiment_dir, exist_ok=True)
+    Path(experiment_dir).mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     for subdir in subdirs:
-        os.makedirs(os.path.join(experiment_dir, subdir), exist_ok=True)
+        Path(
+            experiment_dir,
+            subdir
+        ).mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
-    # salva JSON
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-        json.dump(json_data, json_file, indent=4, sort_keys=True)
+    json_data["experiment_dir"]=experiment_dir
+    json_data["tep_directory_structure"]=subdirs
 
-    return json_data, experiment_dir, sub
+    with open(
+        Path(experiment_dir)/f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            make_json_serializable(json_data),
+            json_file,
+            indent=4,
+            sort_keys=True
+        )
+
+    return json_data,experiment_dir,sub
+
+
+def load_pipeline_version(version_file=None):
+    from pathlib import Path
+
+    if version_file is None:
+        version_file=Path(__file__).resolve().parent/"TMSpathPipeline_versions.txt"
+    else:
+        version_file=Path(version_file).expanduser().resolve()
+
+    if not version_file.exists():
+        raise FileNotFoundError(
+            f"File versioni non trovato: {version_file}"
+        )
+
+    lines=[
+        line.strip()
+        for line in version_file.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    if not lines:
+        raise ValueError(
+            f"Il file versioni è vuoto: {version_file}"
+        )
+
+    fields=[
+        field.strip()
+        for field in lines[-1].split("|")
+    ]
+
+    if len(fields)!=3:
+        raise ValueError(
+            "L'ultima riga deve avere il formato "
+            "YYYY-MM-DD|nome_pipeline|versione"
+        )
+
+    release_date,pipeline_name,pipeline_version=fields
+
+    return {
+        "pipeline_name":pipeline_name,
+        "pipeline_version":pipeline_version,
+        "pipeline_release_date":release_date,
+        "pipeline_version_file":str(version_file),
+        "pipeline_version_record":lines[-1]
+    }
 
 
 def directorySetup_old_20260416(json_data):
@@ -2088,6 +2300,142 @@ def add_TEP_to_json(json_file, postICA_final):
     print("[INFO] Aggiunte TEP_3d, TEP_2d, TEP_1d a json_file")
     return json_file
 
+def compute_pcist(postICA_final, json_data, experiment_dir, sub):
+    from pathlib import Path
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    pcist_reference={
+        "software":{
+            "name":"PCIst",
+            "repository":"https://github.com/renzocom/PCIst",
+            "license":"GPL-3.0"
+        },
+        "paper":{
+            "citation":(
+                "Comolatti R et al. A fast and general method to empirically "
+                "estimate the complexity of brain responses to transcranial "
+                "and intracranial stimulations. Brain Stimulation. "
+                "2019;12(5):1280-1289."
+            ),
+            "title":(
+                "A fast and general method to empirically estimate the complexity "
+                "of brain responses to transcranial and intracranial stimulations"
+            ),
+            "journal":"Brain Stimulation",
+            "year":2019,
+            "volume":12,
+            "issue":5,
+            "pages":"1280-1289",
+            "doi":"10.1016/j.brs.2019.05.013",
+            "article_url":"https://www.sciencedirect.com/science/article/pii/S1935861X19302207"
+        }
+    }
+    
+    try:
+        from PCIst import pci_st
+    except ImportError as exc:
+        raise ImportError("PCIst non installato. Eseguire: pip install PCIst") from exc
+
+    evoked = postICA_final.average()
+    signal = evoked.get_data()
+    times_ms = evoked.times * 1000.0
+
+    pars = {
+        "baseline_window": tuple(json_data.get("pcist_baseline_window_ms", (-400, -50))),
+        "response_window": tuple(json_data.get("pcist_response_window_ms", (0, 300))),
+        "k": float(json_data.get("pcist_k", 1.2)),
+        "min_snr": float(json_data.get("pcist_min_snr", 1.1)),
+        "max_var": float(json_data.get("pcist_max_var", 99)),
+        "embed": bool(json_data.get("pcist_embed", False)),
+        "n_steps": int(json_data.get("pcist_n_steps", 100)),
+        "avgref": False,
+        "baseline_corr": bool(json_data.get("pcist_baseline_corr", False))
+    }
+
+    required_min = min(pars["baseline_window"])
+    required_max = max(pars["response_window"])
+    if times_ms.min() > required_min or times_ms.max() < required_max:
+        raise ValueError(
+            f"Finestra PCIst non contenuta nelle epoche: dati "
+            f"[{times_ms.min():.1f}, {times_ms.max():.1f}] ms, richiesta "
+            f"[{required_min}, {required_max}] ms. Estendere epochs_timewindow_min/max."
+        )
+
+    result = pci_st.calc_PCIst(signal, times_ms, full_return=True, **pars)
+    pci_value = float(result["PCI"])
+    dnst = np.asarray(result["dNST"], dtype=float)
+    dnst_mean = float(np.mean(dnst)) if dnst.size > 0 else float("nan")
+
+    out_dir = Path(experiment_dir) / "5.Extra" / "FE" / "PCIst"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame({"component": np.arange(1, len(dnst) + 1), "dNST": dnst}).to_csv(
+        out_dir / f"{sub}_PCIst_components.csv", index=False
+    )
+    np.savez_compressed(
+        out_dir / f"{sub}_PCIst_full.npz",
+        PCI=pci_value,
+        dNST=dnst,
+        signal_svd=np.asarray(result["signal_svd"]),
+        eigenvalues=np.asarray(result["eigenvalues"]),
+        var_exp=np.asarray(result["var_exp"]),
+        snrs=np.asarray(result["snrs"]),
+        times=np.asarray(result["times"])
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(np.arange(1, len(dnst) + 1), dnst)
+    ax.set_xlabel("SVD component")
+    ax.set_ylabel("ΔNST")
+    ax.set_title(f"{sub} PCIst = {pci_value:.3f}")
+    fig.tight_layout()
+    fig.savefig(out_dir / f"{sub}_PCIst_components.png", dpi=300)
+    plt.close(fig)
+
+    summary={
+        "subject":str(sub),
+        "PCI":pci_value,
+        "n_dims":int(result["n_dims"]),
+        "dNST":dnst.tolist(),
+        "parameters":pars,
+        "input_shape":list(signal.shape),
+        "time_range_ms":[
+            float(times_ms.min()),
+            float(times_ms.max())
+        ],
+        "reference":pcist_reference
+    }
+    with open(out_dir / f"{sub}_PCIst_summary.json", "w") as f:
+        json.dump(summary, f, indent=4)
+    
+    json_data["PCIst_reference"]=pcist_reference
+    json_data["PCIst_software_repository"]=pcist_reference["software"]["repository"]
+    json_data["PCIst_paper_citation"]=pcist_reference["paper"]["citation"]
+    json_data["PCIst_paper_doi"]=pcist_reference["paper"]["doi"]
+    json_data["PCIst_paper_url"]=pcist_reference["paper"]["article_url"]
+
+    print(
+        f"✅ PCIst = {pci_value:.3f} | "
+        f"retained dimensions = {result['n_dims']}"
+    )
+    
+    print(
+        "📚 PCIst reference: Comolatti R et al., "
+        "Brain Stimulation, 2019;12(5):1280-1289. "
+        "doi:10.1016/j.brs.2019.05.013"
+    )
+    
+    print(
+        "💻 PCIst software: "
+        "https://github.com/renzocom/PCIst"
+    )
+    return pci_value, result, json_data
+
+
+
 def ICAprocessing(file,
                   json_data, experiment_dir, sub,
                   autoReject=True,
@@ -2152,6 +2500,8 @@ def ICAprocessing(file,
     json_data['ICA_excludedComponents'] = [int(x) for x in ica_model.exclude]
 
     postICA_final = postICAsteps(postICA_raw, json_data, experiment_dir, sub)
+
+
     basicPlots(
         postICA_final,
         json_data,
@@ -2323,6 +2673,380 @@ def ICAprocessing_old_20260416(file,
         
     return postICA_final, json_data
 
+
+
+def extractFeatures(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+):
+    import json
+    import pandas as pd
+    from pathlib import Path
+
+    compute_standard=bool(
+        json_data.get(
+            "do_standard_features",
+            True
+        )
+    )
+    
+    compute_pcist_feature=bool(
+        json_data.get(
+            "do_pcist",
+            False
+        )
+    )
+    
+    compute_fooof=bool(
+        json_data.get(
+            "do_fooof_features",
+            False
+        )
+    )
+    
+    compute_tep_fingerprint_feature=bool(
+        json_data.get(
+            "do_tep_fingerprint",
+            False
+        )
+    )
+
+    
+    sub=str(sub).strip()
+
+    json_data["subject"]=sub
+    json_data["subject_id"]=sub
+
+    fe_dir=(
+        Path(experiment_dir)
+        /"5.Extra"
+        /"FE"
+    )
+
+    fe_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    results={
+        "subject":sub,
+        "subject_id":sub,
+        "feature_directory":str(fe_dir)
+    }
+
+    if compute_standard:
+        print(
+            "🔧 Feature extraction: "
+            "standard post-ICA features"
+        )
+
+        json_data=computeFeatExtraction_v2(
+            postICA_final,
+            json_data,
+            experiment_dir,
+            sub
+        )
+
+        keys=[
+            "feat_step_energy",
+            "feat_step_integral",
+            "feat_step_sampleEntropy",
+            "feat_step_permEntropy",
+            "feat_step_fooofOffset",
+            "feat_step_fooofExponent",
+            "feat_step_meanPLV_seed",
+            "feat_step_maxPLV_seed",
+            "feat_tep_manual"
+        ]
+
+        results["standard"]={
+            key:json_data.get(key)
+            for key in keys
+            if key in json_data
+        }
+
+    if compute_pcist_feature is None:
+        compute_pcist_feature=bool(
+            json_data.get(
+                "do_pcist",
+                False
+            )
+        )
+
+    if compute_pcist_feature:
+        print(
+            "🔧 Feature extraction: PCIst"
+        )
+
+        (
+            pci_value,
+            pcist_result,
+            json_data
+        )=compute_pcist(
+            postICA_final,
+            json_data,
+            experiment_dir,
+            sub
+        )
+
+        results["PCIst"]={
+            "value":float(
+                pci_value
+            ),
+            "n_dims":json_data.get(
+                "PCIst_n_dims"
+            ),
+            "dNST":json_data.get(
+                "PCIst_dNST"
+            ),
+            "parameters":json_data.get(
+                "PCIst_parameters"
+            ),
+            "reference":json_data.get(
+                "PCIst_reference"
+            ),
+            "output_directory":json_data.get(
+                "PCIst_output_dir"
+            )
+        }
+
+    if compute_tep_fingerprint_feature is None:
+        compute_tep_fingerprint_feature=bool(
+            json_data.get(
+                "do_tep_fingerprint",
+                False
+            )
+        )
+
+    if compute_tep_fingerprint_feature:
+        print(
+            "🔧 Feature extraction: "
+            "TEP temporal fingerprint"
+        )
+
+        (
+            fingerprint,
+            df_fingerprint_channels,
+            df_fingerprint_roi,
+            json_data
+        )=compute_tep_fingerprint(
+            postICA_final=postICA_final,
+            json_data=json_data,
+            experiment_dir=experiment_dir,
+            sub=sub,
+            save=True
+        )
+
+        results["TEP_fingerprint"]={
+            "seed_channel":fingerprint.get(
+                "seed_channel"
+            ),
+            "roi_channels":fingerprint.get(
+                "roi_channels"
+            ),
+            "ntop_requested":fingerprint.get(
+                "ntop_requested"
+            ),
+            "ntop_selected":fingerprint.get(
+                "ntop_selected"
+            ),
+            "LP1_ms":fingerprint.get(
+                "LP1_ms"
+            ),
+            "LP2_ms":fingerprint.get(
+                "LP2_ms"
+            ),
+            "LP3_ms":fingerprint.get(
+                "LP3_ms"
+            ),
+            "AP1_P2_uV":fingerprint.get(
+                "AP1_P2_uV"
+            ),
+            "AP2_P3_uV":fingerprint.get(
+                "AP2_P3_uV"
+            ),
+            "SP1_P2_uV_per_ms":fingerprint.get(
+                "SP1_P2_uV_per_ms"
+            ),
+            "SP2_P3_uV_per_ms":fingerprint.get(
+                "SP2_P3_uV_per_ms"
+            ),
+            "abs_SP1_P2_uV_per_ms":fingerprint.get(
+                "abs_SP1_P2_uV_per_ms"
+            ),
+            "abs_SP2_P3_uV_per_ms":fingerprint.get(
+                "abs_SP2_P3_uV_per_ms"
+            ),
+            "IPI_ms":fingerprint.get(
+                "IPI_ms"
+            ),
+            "IPI_Hz":fingerprint.get(
+                "IPI_Hz"
+            ),
+            "reference":fingerprint.get(
+                "reference"
+            ),
+            "output_directory":json_data.get(
+                "TEP_fingerprint_output_dir"
+            ),
+            "channels_csv":json_data.get(
+                "TEP_fingerprint_channels_csv"
+            ),
+            "roi_csv":json_data.get(
+                "TEP_fingerprint_ROI_csv"
+            ),
+            "summary_csv":json_data.get(
+                "TEP_fingerprint_summary_csv"
+            ),
+            "summary_json":json_data.get(
+                "TEP_fingerprint_summary_json"
+            ),
+            "waveform_png":json_data.get(
+                "TEP_fingerprint_waveform_png"
+            ),
+            "topomap_png":json_data.get(
+                "TEP_fingerprint_topomap_png"
+            )
+        }
+
+    if compute_fooof:
+        print(
+            "🔧 Feature extraction: "
+            "channel-wise FOOOF"
+        )
+
+        df_fooof=extract_psd_features(
+            postICA_final,
+            "postICA_final",
+            experiment_dir,
+            json_data
+        )
+
+        results["FOOOF"]={
+            "n_channels":int(
+                len(df_fooof)
+            ),
+            "csv":str(
+                Path(experiment_dir)
+                /"7.FOOOF"
+                /"postICA_final"
+                /"postICA_final.csv"
+            )
+        }
+
+    scalar_results={}
+
+    for section,values in results.items():
+        if not isinstance(
+            values,
+            dict
+        ):
+            continue
+
+        for key,value in values.items():
+            if isinstance(
+                value,
+                (
+                    str,
+                    int,
+                    float,
+                    bool
+                )
+            ) or value is None:
+                scalar_results[
+                    f"{section}_{key}"
+                ]=value
+
+    features_json=(
+        fe_dir
+        /f"{sub}_features_summary.json"
+    )
+
+    features_csv=(
+        fe_dir
+        /f"{sub}_features_summary.csv"
+    )
+
+    with open(
+        features_json,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            make_json_serializable(
+                results
+            ),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    if scalar_results:
+        pd.DataFrame([
+            scalar_results
+        ]).to_csv(
+            features_csv,
+            index=False
+        )
+
+    json_data["feature_extraction_dir"]=str(
+        fe_dir
+    )
+
+    json_data["feature_extraction_completed"]=True
+
+    json_data["feature_extraction_sections"]=[
+        key
+        for key in results
+        if key not in (
+            "subject",
+            "subject_id",
+            "feature_directory"
+        )
+    ]
+
+    json_data[
+        "feature_extraction_summary_json"
+    ]=str(
+        features_json
+    )
+
+    json_data[
+        "feature_extraction_summary_csv"
+    ]=str(
+        features_csv
+    )
+
+    with open(
+        Path(experiment_dir)
+        /f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            make_json_serializable(
+                json_data
+            ),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print(
+        f"✅ Feature extraction completata: "
+        f"{fe_dir}"
+    )
+
+    print(
+        "   Sections:",
+        json_data[
+            "feature_extraction_sections"
+        ]
+    )
+
+    return results,json_data
 
 def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
     # 1
@@ -6553,12 +7277,1674 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     return df_neural_params, pol_degree_min_resonances, pol_degree_min_F
 
 
+def init_notes(json_data,experiment_dir,sub,pipeline="TEP"):
+    from pathlib import Path
+    from datetime import datetime
+    import platform
+    import sys
+
+    notes_path=Path(experiment_dir)/"log.txt"
+    notes_path.parent.mkdir(parents=True,exist_ok=True)
+
+    parameter_descriptions={
+        "date":"Identificativo temporale assegnato all’analisi.",
+        "start_time":"Timestamp numerico usato per calcolare la durata totale della pipeline.",
+        "analysis_id":"Identificativo univoco dell’analisi.",
+        "eeg_type":"Tipo di registrazione analizzata. Per questa pipeline è normalmente tep.",
+        "subject":"Identificativo del soggetto.",
+        "mainDir":"Directory principale contenente i dati del soggetto.",
+        "experiment_dir":"Directory specifica in cui vengono salvati i risultati dell’analisi.",
+        "sourceData":"Dataset o centro di provenienza dei dati.",
+        "dataType":"Formato del file EEG caricato, per esempio ASCII o VHDR.",
+        "emispheric_stimulation":"Emisfero o lato della stimolazione TMS.",
+        "seedChans":"Canali EEG usati come regione di interesse per alcune feature TEP.",
+
+        "r_sfreq":"Frequenza di ricampionamento usata nelle fasi intermedie della pipeline.",
+        "sfreq":"Frequenza di campionamento originale del segnale.",
+        "l_freq":"Frequenza minima del filtro passa-banda.",
+        "h_freq":"Frequenza massima del filtro finale.",
+        "broad_band_h_freq":"Frequenza massima del filtro preliminare broad-band.",
+        "powerline_freq":"Frequenza fondamentale della rete elettrica rimossa tramite notch filter.",
+        "do_filter_and_plot_raw":"Attiva il filtraggio del Raw e il salvataggio dei relativi grafici PSD.",
+
+        "do_pulseArtifactRej":"Attiva la rimozione o sostituzione dell’artefatto immediato da impulso TMS.",
+        "pulse_artifact_rej_timewindow_min":"Inizio, in secondi, della finestra contenente l’artefatto TMS.",
+        "pulse_artifact_rej_timewindow_max":"Fine, in secondi, della finestra contenente l’artefatto TMS.",
+        "pulse_artifact_rej_smoothingvalue":"Ampiezza della finestra usata per raccordare i bordi della correzione dell’impulso.",
+
+        "do_clean_trials_channels":"Attiva il rilevamento e la gestione di trial e canali artefattuali.",
+        "do_chan_trials_selection_automatic":"Se True usa il rilevamento automatico; se False apre la selezione manuale.",
+        "bad_trials":"Indici dei trial esclusi dall’analisi.",
+        "bad_channels":"Canali marcati come artefattuali.",
+        "channels_marked_bad":"Canali mantenuti nell’oggetto ma marcati come bad.",
+        "channels_dropped":"Canali fisicamente eliminati dall’oggetto.",
+        "channel_rejection_policy":"Strategia adottata per la gestione dei canali bad.",
+
+        "do_prepare_epochs":"Attiva la creazione delle epoche TEP finali.",
+        "epochs_timewindow_min":"Inizio dell’epoca rispetto all’impulso TMS, espresso in secondi.",
+        "epochs_timewindow_max":"Fine dell’epoca rispetto all’impulso TMS, espressa in secondi.",
+        "baseline_cor_tmin":"Inizio della finestra usata per la baseline correction.",
+        "baseline_cor_tmax":"Fine della finestra usata per la baseline correction.",
+        "TEP_ID_events":"Origine o identificativo degli eventi usati per costruire le epoche.",
+
+        "trials_wise":"Se True il detrending viene applicato separatamente a ogni trial.",
+        "do_detrend":"Attiva il detrending specifico dell’artefatto post-TMS.",
+        "detrend_type":"Nome generale del modello di detrending selezionato.",
+        "detrend_typeOffsetRise":"Modello usato per descrivere la fase iniziale dell’offset.",
+        "detrend_typeOffsetDecay":"Modello usato per descrivere il decadimento dell’offset.",
+        "detrend_fitConstraint":"Indica se il modello è vincolato a un punto iniziale.",
+        "detrend_polOrder_preOffset":"Ordine polinomiale usato nella finestra precedente all’offset.",
+        "detrend_minTimeWindowOffset":"Inizio della finestra di modellizzazione dell’offset.",
+        "detrend_maxTimeWindowOffset":"Limite massimo della finestra di ricerca dell’offset.",
+        "detrendExtremeTechinque":"Criterio usato per identificare l’estremo dell’artefatto.",
+        "detrend_slopeThr":"Soglia usata per identificare canali con pendenza anomala.",
+        "do_detrend_onlyOffsetChans":"Se True applica il detrending solo ai canali identificati come offset.",
+        "detrend_offsetCorrectionType":"Metodo usato per sostituire o correggere i campioni dell’artefatto.",
+        "detrend_offsetOddSamples":"Ampiezza della regione di raccordo intorno all’offset.",
+        "detrend_lag_correction":"Attiva l’eventuale correzione temporale associata alla finestra dell’offset.",
+        "detrend_overall":"Attiva un detrending globale quando il detrending finestrato non viene eseguito.",
+        "detrend_noWindowedOrder":"Ordine del detrending globale non finestrato.",
+
+        "do_artifact":"Attiva l’iniezione di un artefatto sintetico per test della pipeline.",
+        "do_artifact_rise":"Costante temporale di salita dell’artefatto sintetico.",
+        "do_artifact_decay":"Costante temporale di decadimento dell’artefatto sintetico.",
+        "do_artifact_gain":"Ampiezza dell’artefatto sintetico.",
+        "do_artifact_chans":"Canali sui quali viene aggiunto l’artefatto sintetico.",
+
+        "do_ica":"Attiva la decomposizione ICA.",
+        "do_ica_continuum":"Attiva un’eventuale ICA preliminare sul continuo.",
+        "do_ica_manualCheck":"Attiva la revisione manuale delle componenti ICA.",
+        "do_ica_automaticRej":"Attiva l’esclusione automatica delle componenti tramite ICLabel.",
+        "do_label_prob_threshold":"Probabilità minima ICLabel richiesta per escludere automaticamente una componente.",
+        "do_ica_eigThresh":"Percentile impiegato dal criterio basato sugli autovalori ICA.",
+        "ICA_components_tot":"Numero totale di componenti ICA stimate.",
+        "ICA_excludedComponents":"Componenti ICA escluse definitivamente.",
+        "ICA_includedComponents_tot":"Numero di componenti ICA mantenute.",
+        "ICA_autoExcludedComponents":"Componenti proposte automaticamente per l’esclusione.",
+        "ICA_manualAddedComponents":"Componenti aggiunte manualmente alla lista di esclusione.",
+        "ICA_manualRecoveredComponents":"Componenti inizialmente escluse e successivamente recuperate.",
+
+        "rest_features_fmin":"Frequenza minima delle feature spettrali, se usata anche nella pipeline TEP.",
+        "rest_features_fmax":"Frequenza massima delle feature spettrali, se usata anche nella pipeline TEP.",
+        "pcist_baseline_window_ms":"Finestra pre-stimolo usata da PCIst per stimare la dinamica di baseline.",
+        "pcist_response_window_ms":"Finestra post-stimolo usata per calcolare PCIst.",
+        "pcist_k":"Parametro di soglia PCIst che regola il criterio di significatività delle transizioni.",
+        "pcist_min_snr":"Rapporto segnale-rumore minimo richiesto per mantenere una componente.",
+        "pcist_max_var":"Percentuale massima di varianza cumulativa mantenuta nella decomposizione.",
+        "pcist_embed":"Attiva l’embedding temporale previsto dall’implementazione PCIst.",
+        "pcist_n_steps":"Numero di soglie testate durante il calcolo PCIst.",
+        "pcist_baseline_corr":"Attiva la baseline correction interna alla funzione PCIst.",
+        "do_pcist":"Attiva il calcolo della Perturbational Complexity Index state-transition.",
+        "PCIst":"Valore finale PCIst calcolato sul TEP medio.",
+        "PCIst_n_dims":"Numero di componenti SVD significative mantenute da PCIst.",
+        "PCIst_dNST":"Contributo alla complessità di ogni componente SVD.",
+
+        "feature_extraction_dir":"Directory contenente le feature post-ICA.",
+        "feature_extraction_completed":"Indica se l’estrazione delle feature è stata completata.",
+        "feature_extraction_sections":"Elenco delle sezioni di feature effettivamente calcolate."
+    }
+
+    with open(notes_path,"w",encoding="utf-8") as file:
+        file.write("="*80+"\n")
+        file.write("TMSPATH ANALYSIS NOTES\n")
+        file.write("="*80+"\n\n")
+        file.write(f"Subject: {sub}\n")
+        file.write(f"Pipeline: {pipeline}\n")
+        file.write(f"Analysis started: {datetime.now().isoformat(timespec='seconds')}\n")
+        file.write(f"Experiment directory: {Path(experiment_dir).resolve()}\n")
+        file.write(f"Python: {sys.version.split()[0]}\n")
+        file.write(f"Operating system: {platform.platform()}\n\n")
+
+        file.write("-"*80+"\n")
+        file.write("CONFIGURATION PARAMETERS\n")
+        file.write("-"*80+"\n\n")
+
+        for key,value in json_data.items():
+            description=parameter_descriptions.get(
+                key,
+                "Parametro della pipeline senza descrizione specifica."
+            )
+            file.write(f"{key}\n")
+            file.write(f"  Value: {value}\n")
+            file.write(f"  Meaning: {description}\n\n")
+
+        file.write("-"*80+"\n")
+        file.write("PROCEDURAL LOG\n")
+        file.write("-"*80+"\n\n")
+
+    json_data["notes_path"]=str(notes_path)
+
+    return notes_path,json_data
+
+def log_note(experiment_dir,message,level="INFO",details=None):
+    from pathlib import Path
+    from datetime import datetime
+
+    notes_path=Path(experiment_dir)/"log.txt"
+    notes_path.parent.mkdir(parents=True,exist_ok=True)
+
+    timestamp=datetime.now().isoformat(timespec="seconds")
+
+    with open(notes_path,"a",encoding="utf-8") as file:
+        file.write(f"[{timestamp}] [{level}] {message}\n")
+
+        if details is not None:
+            if isinstance(details,dict):
+                for key,value in details.items():
+                    file.write(f"    {key}: {value}\n")
+            else:
+                file.write(f"    {details}\n")
+
+        file.write("\n")
+
+def start_log_step(experiment_dir,step_name,details=None):
+    import time
+
+    log_note(
+        experiment_dir,
+        step_name,
+        level="START",
+        details=details
+    )
+
+    return time.time()
+
+def end_log_step(experiment_dir,step_name,start_time,details=None):
+    import time
+
+    elapsed=time.time()-start_time
+
+    final_details={} if details is None else dict(details)
+    final_details["elapsed_sec"]=round(elapsed,3)
+
+    log_note(
+        experiment_dir,
+        step_name,
+        level="DONE",
+        details=final_details
+    )
+
+    return elapsed
+
+def finalize_notes(json_data,experiment_dir,sub,status="completed"):
+    from pathlib import Path
+    from datetime import datetime
+    import time
+
+    try:
+        elapsed=time.time()-float(json_data["start_time"])
+    except (KeyError,TypeError,ValueError):
+        elapsed=None
+
+    details={
+        "subject":sub,
+        "status":status,
+        "finished":datetime.now().isoformat(timespec="seconds"),
+        "elapsed_sec":round(elapsed,2) if elapsed is not None else "unknown",
+        "source_data":json_data.get("sourceData"),
+        "data_type":json_data.get("dataType"),
+        "stimulation_side":json_data.get("emispheric_stimulation"),
+        "trials_total":json_data.get("trials_tot"),
+        "trials_selected":json_data.get("trials_selected"),
+        "bad_trials":json_data.get("bad_trials",[]),
+        "bad_channels":json_data.get("bad_channels",[]),
+        "offset_channels":json_data.get("offsetChans",[]),
+        "detrend_performed":json_data.get("do_detrend"),
+        "detrend_model_rise":json_data.get("detrend_typeOffsetRise"),
+        "detrend_model_decay":json_data.get("detrend_typeOffsetDecay"),
+        "detrend_mse":json_data.get("detrend_MSE"),
+        "ICA_components_total":json_data.get("ICA_components_tot"),
+        "ICA_components_excluded":json_data.get("ICA_excludedComponents",[]),
+        "ICA_components_included":json_data.get("ICA_includedComponents_tot"),
+        "PCIst":json_data.get("PCIst"),
+        "PCIst_n_dims":json_data.get("PCIst_n_dims"),
+        "feature_directory":json_data.get("feature_extraction_dir"),
+        "postICA_directory":json_data.get("postICA_dir")
+    }
+
+    log_note(
+        experiment_dir,
+        "TEP analysis finished",
+        level="SUMMARY",
+        details=details
+    )
+
+    notes_path=Path(experiment_dir)/"log.txt"
+
+    with open(notes_path,"a",encoding="utf-8") as file:
+        file.write("="*80+"\n")
+        file.write("END OF TEP ANALYSIS\n")
+        file.write("="*80+"\n")
+
+    return notes_path
+
+
+
+def compute_tep_natural_frequency(
+    postICA_final,
+    roi_channels,
+    json_data,
+    experiment_dir,
+    sub,
+    fmin=None,
+    fmax=None,
+    baseline_window_ms=None,
+    response_window_ms=None,
+    width=None,
+    save=True
+):
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from mne.time_frequency import tfr_array_stockwell
+
+    sub=str(sub).strip()
+
+    fmin=float(
+        json_data.get(
+            "tep_nf_fmin",
+            4.0 if fmin is None else fmin
+        )
+    )
+
+    fmax=float(
+        json_data.get(
+            "tep_nf_fmax",
+            45.0 if fmax is None else fmax
+        )
+    )
+
+    width=float(
+        json_data.get(
+            "tep_nf_stockwell_width",
+            0.7 if width is None else width
+        )
+    )
+
+    baseline_window_ms=tuple(
+        json_data.get(
+            "tep_nf_baseline_window_ms",
+            (-100,-10)
+            if baseline_window_ms is None
+            else baseline_window_ms
+        )
+    )
+
+    response_window_ms=tuple(
+        json_data.get(
+            "tep_nf_response_window_ms",
+            (20,120)
+            if response_window_ms is None
+            else response_window_ms
+        )
+    )
+
+    roi_channels=[
+        channel
+        for channel in roi_channels
+        if channel in postICA_final.ch_names
+    ]
+
+    if not roi_channels:
+        raise ValueError(
+            "Nessun canale ROI disponibile per la Natural Frequency."
+        )
+
+    evoked=(
+        postICA_final
+        .copy()
+        .pick(roi_channels)
+        .average()
+    )
+
+    data=np.asarray(
+        evoked.get_data(),
+        dtype=float
+    )
+
+    times_ms=np.asarray(
+        evoked.times,
+        dtype=float
+    )*1000.0
+
+    sfreq=float(
+        evoked.info["sfreq"]
+    )
+
+    nyquist=sfreq/2.0
+    fmax=min(fmax,nyquist)
+
+    if fmin>=fmax:
+        raise ValueError(
+            f"Intervallo NF non valido: {fmin}-{fmax} Hz."
+        )
+
+    baseline_mask=(
+        (times_ms>=float(baseline_window_ms[0]))
+        &(times_ms<=float(baseline_window_ms[1]))
+    )
+
+    response_mask=(
+        (times_ms>=float(response_window_ms[0]))
+        &(times_ms<=float(response_window_ms[1]))
+    )
+
+    if np.sum(baseline_mask)<2:
+        raise ValueError(
+            f"Baseline NF {baseline_window_ms} ms non contenuta nei dati "
+            f"[{times_ms.min():.3f},{times_ms.max():.3f}] ms."
+        )
+
+    if np.sum(response_mask)<2:
+        raise ValueError(
+            f"Finestra NF {response_window_ms} ms non contenuta nei dati."
+        )
+
+    stockwell_input=data[np.newaxis,:,:]
+
+    stockwell_power,freqs=tfr_array_stockwell(
+        stockwell_input,
+        sfreq=sfreq,
+        fmin=fmin,
+        fmax=fmax,
+        width=width,
+        return_itc=False,
+        verbose=False
+    )
+
+    stockwell_power=np.asarray(
+        stockwell_power,
+        dtype=float
+    )
+
+    if stockwell_power.ndim!=3:
+        raise RuntimeError(
+            f"Shape Stockwell inattesa: {stockwell_power.shape}"
+        )
+
+    baseline_power=np.mean(
+        stockwell_power[:,:,baseline_mask],
+        axis=2,
+        keepdims=True
+    )
+
+    corrected_power=(
+        stockwell_power
+        -baseline_power
+    )
+
+    roi_tf_power=np.mean(
+        corrected_power,
+        axis=0
+    )
+
+    psd_evoked=np.sum(
+        roi_tf_power[:,response_mask],
+        axis=1
+    )
+
+    if not np.any(
+        np.isfinite(psd_evoked)
+    ):
+        raise RuntimeError(
+            "La PSD evocata non contiene valori validi."
+        )
+
+    nf_index=int(
+        np.nanargmax(
+            psd_evoked
+        )
+    )
+
+    natural_frequency_hz=float(
+        freqs[nf_index]
+    )
+
+    band_definitions={
+        "theta":(4.0,7.0),
+        "alpha":(8.0,13.0),
+        "beta1":(13.0,20.0),
+        "beta2":(20.0,30.0),
+        "gamma":(30.0,45.0)
+    }
+
+    band_power={}
+
+    for band_name,(band_min,band_max) in band_definitions.items():
+        mask=(
+            (freqs>=band_min)
+            &(freqs<band_max)
+        )
+
+        if np.sum(mask)<2:
+            band_power[band_name]=np.nan
+        else:
+            band_power[band_name]=float(
+                np.trapezoid(
+                    psd_evoked[mask],
+                    freqs[mask]
+                )
+            )
+
+    out_dir=(
+        Path(experiment_dir)
+        /"5.Extra"
+        /"FE"
+        /"Fingerprint"
+    )
+
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    spectrum_csv=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_spectrum.csv"
+    )
+
+    summary_json=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_summary.json"
+    )
+
+    spectrum_png=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_spectrum.png"
+    )
+
+    tf_png=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_stockwell.png"
+    )
+
+    reference={
+        "primary_reference":{
+            "citation":(
+                "Rosanova M, Casali A, Bellina V, Resta F, "
+                "Mariotti M, Massimini M. Natural Frequencies "
+                "of Human Corticothalamic Circuits. "
+                "Journal of Neuroscience. 2009;29:7679-7685."
+            ),
+            "doi":"10.1523/JNEUROSCI.0445-09.2009"
+        },
+        "clinical_reference":{
+            "citation":(
+                "Rosanova M, Fecchio M, Casarotto S, et al. "
+                "Sleep-like cortical OFF-periods disrupt causality "
+                "and complexity in the brain of unresponsive "
+                "wakefulness syndrome patients. "
+                "Nature Communications. 2018;9:4427."
+            ),
+            "doi":"10.1038/s41467-018-06871-1"
+        }
+    }
+
+    summary={
+        "subject":sub,
+        "subject_id":sub,
+        "natural_frequency_hz":natural_frequency_hz,
+        "roi_channels":list(roi_channels),
+        "fmin":fmin,
+        "fmax":fmax,
+        "stockwell_width":width,
+        "baseline_window_ms":[
+            float(baseline_window_ms[0]),
+            float(baseline_window_ms[1])
+        ],
+        "response_window_ms":[
+            float(response_window_ms[0]),
+            float(response_window_ms[1])
+        ],
+        "band_power":band_power,
+        "reference":reference
+    }
+
+    if save:
+        pd.DataFrame({
+            "subject":sub,
+            "frequency_hz":freqs,
+            "evoked_power":psd_evoked
+        }).to_csv(
+            spectrum_csv,
+            index=False
+        )
+
+        with open(
+            summary_json,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                summary,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        fig,ax=plt.subplots(
+            figsize=(10,6)
+        )
+
+        ax.plot(
+            freqs,
+            psd_evoked,
+            linewidth=2
+        )
+
+        ax.axvline(
+            natural_frequency_hz,
+            linestyle="--",
+            linewidth=2,
+            label=f"NF={natural_frequency_hz:.2f} Hz"
+        )
+
+        ax.set_xlim(
+            fmin,
+            fmax
+        )
+
+        ax.set_xlabel(
+            "Frequency [Hz]"
+        )
+
+        ax.set_ylabel(
+            "Baseline-corrected evoked power"
+        )
+
+        ax.set_title(
+            f"{sub} TEP Natural Frequency\n"
+            f"ROI={roi_channels}"
+        )
+
+        ax.legend()
+        fig.tight_layout()
+
+        fig.savefig(
+            spectrum_png,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        fig,ax=plt.subplots(
+            figsize=(11,6)
+        )
+
+        image=ax.imshow(
+            roi_tf_power,
+            aspect="auto",
+            origin="lower",
+            extent=[
+                times_ms[0],
+                times_ms[-1],
+                freqs[0],
+                freqs[-1]
+            ]
+        )
+
+        ax.axvline(
+            0,
+            linestyle="--",
+            linewidth=1
+        )
+
+        ax.axvspan(
+            response_window_ms[0],
+            response_window_ms[1],
+            alpha=0.15
+        )
+
+        ax.axhline(
+            natural_frequency_hz,
+            linestyle="--",
+            linewidth=1
+        )
+
+        ax.set_xlabel(
+            "Time [ms]"
+        )
+
+        ax.set_ylabel(
+            "Frequency [Hz]"
+        )
+
+        ax.set_title(
+            f"{sub} Stockwell TEP power"
+        )
+
+        fig.colorbar(
+            image,
+            ax=ax,
+            label="Baseline-corrected power"
+        )
+
+        fig.tight_layout()
+
+        fig.savefig(
+            tf_png,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+    json_data["TEP_natural_frequency_computed"]=True
+    json_data["TEP_natural_frequency_hz"]=natural_frequency_hz
+    json_data["TEP_natural_frequency_ROI_channels"]=list(
+        roi_channels
+    )
+    json_data["TEP_natural_frequency_band_power"]=band_power
+    json_data["TEP_natural_frequency_parameters"]={
+        "fmin":fmin,
+        "fmax":fmax,
+        "stockwell_width":width,
+        "baseline_window_ms":list(
+            baseline_window_ms
+        ),
+        "response_window_ms":list(
+            response_window_ms
+        )
+    }
+    json_data["TEP_natural_frequency_reference"]=reference
+    json_data["TEP_natural_frequency_primary_DOI"]=(
+        "10.1523/JNEUROSCI.0445-09.2009"
+    )
+    json_data["TEP_natural_frequency_clinical_DOI"]=(
+        "10.1038/s41467-018-06871-1"
+    )
+    json_data["TEP_natural_frequency_spectrum_csv"]=str(
+        spectrum_csv
+    )
+    json_data["TEP_natural_frequency_summary_json"]=str(
+        summary_json
+    )
+    json_data["TEP_natural_frequency_spectrum_png"]=str(
+        spectrum_png
+    )
+    json_data["TEP_natural_frequency_stockwell_png"]=str(
+        tf_png
+    )
+
+    print("✅ TEP Natural Frequency completata")
+    print(f"   Subject: {sub}")
+    print(f"   ROI channels: {roi_channels}")
+    print(f"   Natural Frequency: {natural_frequency_hz:.3f} Hz")
+    print(
+        "📚 Rosanova et al., Natural Frequencies of Human "
+        "Corticothalamic Circuits, J Neurosci, 2009"
+    )
+    print(
+        "🔗 DOI: 10.1523/JNEUROSCI.0445-09.2009"
+    )
+    print(
+        "📚 Rosanova et al., Sleep-like cortical OFF-periods "
+        "disrupt causality and complexity, Nat Commun, 2018"
+    )
+    print(
+        "🔗 DOI: 10.1038/s41467-018-06871-1"
+    )
+
+    return (
+        natural_frequency_hz,
+        psd_evoked,
+        freqs,
+        summary,
+        json_data
+    )
 
 
 
 
 
 
+def compute_tep_fingerprint(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+    ntop=None,
+    p1_window_ms=None,
+    search_end_ms=None,
+    min_peak_distance_ms=None,
+    exclude_lateral_channels=None,
+    save=True
+):
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import mne
+    from pathlib import Path
+    from scipy.signal import find_peaks
+
+    sub=str(sub).strip()
+
+    ntop=int(
+        json_data.get(
+            "tep_fingerprint_ntop",
+            4 if ntop is None else ntop
+        )
+    )
+
+    p1_window_ms=tuple(
+        json_data.get(
+            "tep_fingerprint_p1_window_ms",
+            (10,40) if p1_window_ms is None else p1_window_ms
+        )
+    )
+
+    search_end_ms=float(
+        json_data.get(
+            "tep_fingerprint_search_end_ms",
+            200 if search_end_ms is None else search_end_ms
+        )
+    )
+
+    min_peak_distance_ms=float(
+        json_data.get(
+            "tep_fingerprint_min_peak_distance_ms",
+            14 if min_peak_distance_ms is None else min_peak_distance_ms
+        )
+    )
+
+    if ntop<1:
+        raise ValueError("ntop deve essere almeno 1.")
+
+    if exclude_lateral_channels is None:
+        exclude_lateral_channels=json_data.get(
+            "tep_fingerprint_exclude_channels",
+            [
+                "Fp1","Fpz","Fp2","F7","F8",
+                "FT7","FT8","T7","T8",
+                "TP7","TP8","TP9","TP10",
+                "P7","P8","Iz"
+            ]
+        )
+
+    epochs=postICA_final.copy().pick("eeg")
+    evoked=epochs.average()
+
+    data=np.asarray(
+        evoked.get_data(),
+        dtype=float
+    )*1e6
+
+    times_ms=np.asarray(
+        evoked.times,
+        dtype=float
+    )*1000.0
+
+    sfreq=float(evoked.info["sfreq"])
+
+    excluded_channels=[
+        channel
+        for channel in exclude_lateral_channels
+        if channel in evoked.ch_names
+    ]
+
+    allowed_channels=[
+        channel
+        for channel in evoked.ch_names
+        if channel not in excluded_channels
+    ]
+
+    if len(allowed_channels)<ntop:
+        raise ValueError(
+            f"Canali analizzabili={len(allowed_channels)}, "
+            f"ma ntop={ntop}."
+        )
+
+    p1_start=float(p1_window_ms[0])
+    p1_stop=float(p1_window_ms[1])
+
+    if p1_stop<=p1_start:
+        raise ValueError(
+            f"Finestra P1 non valida: {p1_window_ms}"
+        )
+
+    if times_ms.min()>p1_start or times_ms.max()<p1_stop:
+        raise ValueError(
+            f"Finestra P1 {p1_window_ms} ms non contenuta nei dati "
+            f"[{times_ms.min():.3f},{times_ms.max():.3f}] ms."
+        )
+
+    search_end_ms=min(
+        search_end_ms,
+        float(times_ms.max())
+    )
+
+    if search_end_ms<=p1_stop:
+        raise ValueError(
+            "tep_fingerprint_search_end_ms deve essere "
+            "successivo alla finestra P1."
+        )
+
+    p1_mask=(
+        (times_ms>=p1_start)
+        &(times_ms<=p1_stop)
+    )
+
+    if np.sum(p1_mask)<3:
+        raise ValueError(
+            "Numero insufficiente di campioni nella finestra P1."
+        )
+
+    min_peak_distance_samples=max(
+        1,
+        int(
+            round(
+                min_peak_distance_ms
+                *sfreq
+                /1000.0
+            )
+        )
+    )
+
+    def first_valid_peak(
+        signal,
+        candidate_indices,
+        positive
+    ):
+        if candidate_indices.size<3:
+            return None
+
+        candidate_signal=signal[
+            candidate_indices
+        ]
+
+        peaks,_=find_peaks(
+            candidate_signal if positive else -candidate_signal,
+            distance=min_peak_distance_samples
+        )
+
+        if len(peaks)==0:
+            return None
+
+        return int(
+            candidate_indices[
+                int(peaks[0])
+            ]
+        )
+
+    def detect_channel_peaks(
+        signal,
+        channel
+    ):
+        p1_indices=np.where(
+            p1_mask
+        )[0]
+
+        first_index=int(
+            p1_indices[0]
+        )
+
+        last_index=int(
+            p1_indices[-1]
+        )
+
+        midpoint_ms=float(
+            np.mean(
+                p1_window_ms
+            )
+        )
+
+        midpoint_index=int(
+            np.argmin(
+                np.abs(
+                    times_ms-midpoint_ms
+                )
+            )
+        )
+
+        edge_mean=float(
+            np.mean([
+                signal[first_index],
+                signal[last_index]
+            ])
+        )
+
+        midpoint_value=float(
+            signal[midpoint_index]
+        )
+
+        p1_is_positive=bool(
+            midpoint_value>edge_mean
+        )
+
+        p1_segment=signal[
+            p1_indices
+        ]
+
+        if p1_is_positive:
+            p1_index=int(
+                p1_indices[
+                    int(np.argmax(p1_segment))
+                ]
+            )
+        else:
+            p1_index=int(
+                p1_indices[
+                    int(np.argmin(p1_segment))
+                ]
+            )
+
+        p2_indices=np.where(
+            (
+                times_ms
+                >=times_ms[p1_index]
+                +min_peak_distance_ms
+            )
+            &(times_ms<=search_end_ms)
+        )[0]
+
+        p2_index=first_valid_peak(
+            signal=signal,
+            candidate_indices=p2_indices,
+            positive=not p1_is_positive
+        )
+
+        if p2_index is None:
+            return None
+
+        p3_indices=np.where(
+            (
+                times_ms
+                >=times_ms[p2_index]
+                +min_peak_distance_ms
+            )
+            &(times_ms<=search_end_ms)
+        )[0]
+
+        p3_index=first_valid_peak(
+            signal=signal,
+            candidate_indices=p3_indices,
+            positive=p1_is_positive
+        )
+
+        if p3_index is None:
+            return None
+
+        lp1=float(
+            times_ms[p1_index]
+        )
+
+        lp2=float(
+            times_ms[p2_index]
+        )
+
+        lp3=float(
+            times_ms[p3_index]
+        )
+
+        vp1=float(
+            signal[p1_index]
+        )
+
+        vp2=float(
+            signal[p2_index]
+        )
+
+        vp3=float(
+            signal[p3_index]
+        )
+
+        dt1=float(
+            lp2-lp1
+        )
+
+        dt2=float(
+            lp3-lp2
+        )
+
+        ipi=float(
+            lp3-lp1
+        )
+
+        if dt1<=0 or dt2<=0 or ipi<=0:
+            return None
+
+        ap1_p2=float(
+            abs(vp1-vp2)
+        )
+
+        ap2_p3=float(
+            abs(vp2-vp3)
+        )
+
+        sp1_p2=float(
+            (vp2-vp1)/dt1
+        )
+
+        sp2_p3=float(
+            (vp3-vp2)/dt2
+        )
+
+        ipi_hz=float(
+            1000.0/ipi
+        )
+
+        return {
+            "subject":sub,
+            "subject_id":sub,
+            "channel":str(channel),
+            "P1_polarity":(
+                "positive"
+                if p1_is_positive
+                else "negative"
+            ),
+            "P1_amplitude_uV":vp1,
+            "P2_amplitude_uV":vp2,
+            "P3_amplitude_uV":vp3,
+            "LP1_ms":lp1,
+            "LP2_ms":lp2,
+            "LP3_ms":lp3,
+            "AP1_P2_uV":ap1_p2,
+            "AP2_P3_uV":ap2_p3,
+            "SP1_P2_uV_per_ms":sp1_p2,
+            "SP2_P3_uV_per_ms":sp2_p3,
+            "abs_SP1_P2_uV_per_ms":abs(sp1_p2),
+            "abs_SP2_P3_uV_per_ms":abs(sp2_p3),
+            "IPI_ms":ipi,
+            "IPI_Hz":ipi_hz,
+            "P1_sample":int(p1_index),
+            "P2_sample":int(p2_index),
+            "P3_sample":int(p3_index)
+        }
+
+    rows=[]
+
+    for channel in allowed_channels:
+        channel_index=evoked.ch_names.index(
+            channel
+        )
+
+        channel_result=detect_channel_peaks(
+            signal=data[channel_index],
+            channel=channel
+        )
+
+        if channel_result is not None:
+            rows.append(
+                channel_result
+            )
+
+    df_channels=pd.DataFrame(
+        rows
+    )
+
+    if df_channels.empty:
+        raise RuntimeError(
+            "P1, P2 e P3 non sono stati identificati "
+            "in alcun canale."
+        )
+
+    df_channels=df_channels.sort_values(
+        "AP1_P2_uV",
+        ascending=False
+    ).reset_index(
+        drop=True
+    )
+
+    adjacency,adjacency_channels=(
+        mne.channels.find_ch_adjacency(
+            evoked.info,
+            ch_type="eeg"
+        )
+    )
+
+    adjacency_channels=[
+        str(channel)
+        for channel in adjacency_channels
+    ]
+
+    channel_to_adjacency_index={
+        channel:index
+        for index,channel in enumerate(
+            adjacency_channels
+        )
+    }
+
+    ranked_channels=[
+        str(channel)
+        for channel in df_channels["channel"]
+        if channel in channel_to_adjacency_index
+    ]
+
+    if not ranked_channels:
+        raise RuntimeError(
+            "Nessun canale rilevato è presente "
+            "nella matrice di adiacenza."
+        )
+
+    seed_channel=ranked_channels[0]
+    roi_channels=[seed_channel]
+
+    while len(roi_channels)<ntop:
+        candidates=[]
+
+        for channel in ranked_channels:
+            if channel in roi_channels:
+                continue
+
+            candidate_index=channel_to_adjacency_index[
+                channel
+            ]
+
+            connected=any(
+                bool(
+                    adjacency[
+                        candidate_index,
+                        channel_to_adjacency_index[
+                            selected_channel
+                        ]
+                    ]
+                )
+                for selected_channel in roi_channels
+                if selected_channel
+                in channel_to_adjacency_index
+            )
+
+            if connected:
+                candidates.append(
+                    channel
+                )
+
+        if not candidates:
+            print(
+                "⚠️ Impossibile espandere il cluster "
+                f"connesso oltre {len(roi_channels)} canali."
+            )
+            break
+
+        roi_channels.append(
+            candidates[0]
+        )
+
+    if len(roi_channels)<ntop:
+        print(
+            f"⚠️ ROI selezionata con {len(roi_channels)} "
+            f"canali invece di ntop={ntop}."
+        )
+
+    df_channels["ROI_selected"]=(
+        df_channels["channel"].isin(
+            roi_channels
+        )
+    )
+
+    df_channels["AP1_P2_rank"]=(
+        np.arange(
+            len(df_channels)
+        )+1
+    )
+
+    df_roi=df_channels[
+        df_channels["ROI_selected"]
+    ].copy()
+
+    if df_roi.empty:
+        raise RuntimeError(
+            "La ROI del fingerprint è vuota."
+        )
+
+    numeric_features=[
+        "LP1_ms",
+        "LP2_ms",
+        "LP3_ms",
+        "AP1_P2_uV",
+        "AP2_P3_uV",
+        "SP1_P2_uV_per_ms",
+        "SP2_P3_uV_per_ms",
+        "abs_SP1_P2_uV_per_ms",
+        "abs_SP2_P3_uV_per_ms",
+        "IPI_ms",
+        "IPI_Hz"
+    ]
+
+    fingerprint={
+        feature:float(
+            df_roi[feature].mean()
+        )
+        for feature in numeric_features
+    }
+
+    reference={
+        "citation":(
+            "Hassan G, Gaglioti G, Furregoni G, et al. "
+            "Temporal fingerprints of TMS-evoked potentials "
+            "across thalamocortical circuits. bioRxiv. 2026."
+        ),
+        "title":(
+            "Temporal fingerprints of TMS-evoked "
+            "potentials across thalamocortical circuits"
+        ),
+        "doi":"10.64898/2026.06.29.734769",
+        "publication_status":"bioRxiv preprint",
+        "license":"CC-BY 4.0"
+    }
+
+    fingerprint.update({
+        "subject":sub,
+        "subject_id":sub,
+        "seed_channel":seed_channel,
+        "roi_channels":list(
+            roi_channels
+        ),
+        "ntop_requested":int(
+            ntop
+        ),
+        "ntop_selected":int(
+            len(roi_channels)
+        ),
+        "n_channels_available":int(
+            len(allowed_channels)
+        ),
+        "n_channels_with_valid_peaks":int(
+            len(df_channels)
+        ),
+        "excluded_channels":list(
+            excluded_channels
+        ),
+        "P1_window_ms":[
+            p1_start,
+            p1_stop
+        ],
+        "search_end_ms":float(
+            search_end_ms
+        ),
+        "min_peak_distance_ms":float(
+            min_peak_distance_ms
+        ),
+        "ROI_selection":(
+            "Maximum AP1-P2 seed followed by highest-ranked "
+            "spatially adjacent channels"
+        ),
+        "reference":reference
+    })
+
+    out_dir=(
+        Path(experiment_dir)
+        /"5.Extra"
+        /"FE"
+        /"Fingerprint"
+    )
+
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    channel_csv=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_channels.csv"
+    )
+
+    roi_csv=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_ROI.csv"
+    )
+
+    summary_json=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_summary.json"
+    )
+
+    summary_csv=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_summary.csv"
+    )
+
+    waveform_png=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_ROI_waveforms.png"
+    )
+
+    topomap_png=(
+        out_dir
+        /f"{sub}_TEP_fingerprint_AP1_P2_topomap.png"
+    )
+
+    if save:
+        df_channels.to_csv(
+            channel_csv,
+            index=False
+        )
+
+        df_roi.to_csv(
+            roi_csv,
+            index=False
+        )
+
+        flat_summary={
+            key:value
+            for key,value in fingerprint.items()
+            if not isinstance(
+                value,
+                (list,dict)
+            )
+        }
+
+        flat_summary["roi_channels"]=";".join(
+            roi_channels
+        )
+
+        flat_summary["excluded_channels"]=";".join(
+            excluded_channels
+        )
+
+        flat_summary["reference_doi"]=reference[
+            "doi"
+        ]
+
+        flat_summary["reference_citation"]=reference[
+            "citation"
+        ]
+
+        pd.DataFrame([
+            flat_summary
+        ]).to_csv(
+            summary_csv,
+            index=False
+        )
+
+        with open(
+            summary_json,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                fingerprint,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        fig,ax=plt.subplots(
+            figsize=(11,6)
+        )
+
+        for channel in roi_channels:
+            channel_index=evoked.ch_names.index(
+                channel
+            )
+
+            row=df_roi[
+                df_roi["channel"]==channel
+            ].iloc[0]
+
+            ax.plot(
+                times_ms,
+                data[channel_index],
+                linewidth=1.5,
+                label=channel
+            )
+
+            ax.scatter(
+                [
+                    row["LP1_ms"],
+                    row["LP2_ms"],
+                    row["LP3_ms"]
+                ],
+                [
+                    row["P1_amplitude_uV"],
+                    row["P2_amplitude_uV"],
+                    row["P3_amplitude_uV"]
+                ],
+                s=50
+            )
+
+        ax.axvline(
+            0,
+            linestyle="--",
+            linewidth=1
+        )
+
+        ax.axvspan(
+            p1_start,
+            p1_stop,
+            alpha=0.15
+        )
+
+        ax.set_xlim(
+            max(
+                float(times_ms.min()),
+                -100
+            ),
+            search_end_ms
+        )
+
+        ax.set_xlabel(
+            "Time [ms]"
+        )
+
+        ax.set_ylabel(
+            "Amplitude [µV]"
+        )
+
+        ax.set_title(
+            f"{sub} TEP temporal fingerprint\n"
+            f"ROI={roi_channels}"
+        )
+
+        ax.legend(
+            loc="best"
+        )
+
+        fig.tight_layout()
+
+        fig.savefig(
+            waveform_png,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        topomap_values=np.zeros(
+            len(evoked.ch_names),
+            dtype=float
+        )
+
+        valid_topomap_mask=np.zeros(
+            len(evoked.ch_names),
+            dtype=bool
+        )
+
+        for _,row in df_channels.iterrows():
+            channel_index=evoked.ch_names.index(
+                row["channel"]
+            )
+
+            topomap_values[
+                channel_index
+            ]=float(
+                row["AP1_P2_uV"]
+            )
+
+            valid_topomap_mask[
+                channel_index
+            ]=True
+
+        roi_mask=np.asarray(
+            [
+                channel in roi_channels
+                for channel in evoked.ch_names
+            ],
+            dtype=bool
+        )
+
+        if np.any(valid_topomap_mask):
+            fig,ax=plt.subplots(
+                figsize=(7,6)
+            )
+
+            mne.viz.plot_topomap(
+                topomap_values,
+                evoked.info,
+                axes=ax,
+                show=False,
+                contours=8,
+                mask=roi_mask,
+                mask_params={
+                    "marker":"o",
+                    "markerfacecolor":"none",
+                    "markeredgecolor":"black",
+                    "linewidth":2,
+                    "markersize":10
+                }
+            )
+
+            ax.set_title(
+                f"{sub} AP1-P2 [µV]\n"
+                f"ROI={roi_channels}"
+            )
+
+            fig.tight_layout()
+
+            fig.savefig(
+                topomap_png,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close(fig)
+
+    json_data["subject"]=sub
+    json_data["subject_id"]=sub
+    json_data["TEP_fingerprint_computed"]=True
+    json_data["TEP_fingerprint_subject"]=sub
+    json_data["TEP_fingerprint_ntop_requested"]=int(
+        ntop
+    )
+    json_data["TEP_fingerprint_ntop_selected"]=int(
+        len(roi_channels)
+    )
+    json_data["TEP_fingerprint_seed_channel"]=(
+        seed_channel
+    )
+    json_data["TEP_fingerprint_ROI_channels"]=list(
+        roi_channels
+    )
+    json_data["TEP_fingerprint_excluded_channels"]=list(
+        excluded_channels
+    )
+    json_data["TEP_fingerprint_P1_window_ms"]=[
+        p1_start,
+        p1_stop
+    ]
+    json_data["TEP_fingerprint_search_end_ms"]=float(
+        search_end_ms
+    )
+    json_data[
+        "TEP_fingerprint_min_peak_distance_ms"
+    ]=float(
+        min_peak_distance_ms
+    )
+    json_data["TEP_fingerprint_summary"]=fingerprint
+    json_data["TEP_fingerprint_reference"]=reference
+    json_data["TEP_fingerprint_reference_doi"]=(
+        reference["doi"]
+    )
+    json_data["TEP_fingerprint_output_dir"]=str(
+        out_dir
+    )
+    json_data["TEP_fingerprint_channels_csv"]=str(
+        channel_csv
+    )
+    json_data["TEP_fingerprint_ROI_csv"]=str(
+        roi_csv
+    )
+    json_data["TEP_fingerprint_summary_csv"]=str(
+        summary_csv
+    )
+    json_data["TEP_fingerprint_summary_json"]=str(
+        summary_json
+    )
+    json_data["TEP_fingerprint_waveform_png"]=str(
+        waveform_png
+    )
+    json_data["TEP_fingerprint_topomap_png"]=str(
+        topomap_png
+    )
+
+    with open(
+        Path(experiment_dir)/f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            make_json_serializable(
+                json_data
+            ),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print("✅ TEP temporal fingerprint completato")
+    print(f"   Subject: {sub}")
+    print(f"   Seed channel: {seed_channel}")
+    print(f"   ROI channels: {roi_channels}")
+    print(
+        f"   ROI size: {len(roi_channels)} / "
+        f"{ntop} richiesta"
+    )
+    print(
+        f"   LP1: {fingerprint['LP1_ms']:.3f} ms"
+    )
+    print(
+        f"   LP2: {fingerprint['LP2_ms']:.3f} ms"
+    )
+    print(
+        f"   LP3: {fingerprint['LP3_ms']:.3f} ms"
+    )
+    print(
+        f"   AP1-P2: "
+        f"{fingerprint['AP1_P2_uV']:.3f} µV"
+    )
+    print(
+        f"   AP2-P3: "
+        f"{fingerprint['AP2_P3_uV']:.3f} µV"
+    )
+    print(
+        f"   |SP1-P2|: "
+        f"{fingerprint['abs_SP1_P2_uV_per_ms']:.3f} "
+        "µV/ms"
+    )
+    print(
+        f"   |SP2-P3|: "
+        f"{fingerprint['abs_SP2_P3_uV_per_ms']:.3f} "
+        "µV/ms"
+    )
+    print(
+        f"   IPI: {fingerprint['IPI_ms']:.3f} ms"
+    )
+    print(
+        f"   IPIHz: {fingerprint['IPI_Hz']:.3f} Hz"
+    )
+    print(
+        "📚 Reference: Hassan G, Gaglioti G, "
+        "Furregoni G, et al. Temporal fingerprints "
+        "of TMS-evoked potentials across "
+        "thalamocortical circuits. bioRxiv, 2026."
+    )
+    print(
+        "🔗 DOI: 10.64898/2026.06.29.734769"
+    )
+    print(
+        f"   Results: {out_dir}"
+    )
+
+    return (
+        fingerprint,
+        df_channels,
+        df_roi,
+        json_data
+    )
 
 
 

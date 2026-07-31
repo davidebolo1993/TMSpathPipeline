@@ -185,41 +185,172 @@ def directorySetup(json_data):
     import os
     import json
     from pathlib import Path
+    from datetime import datetime
 
-    sub=json_data["subject"]
-    date=json_data["date"]
+    sub=str(
+        json_data["subject"]
+    ).strip().upper()
 
-    if "experiment_dir" in json_data and json_data["experiment_dir"]:
-        experiment_dir=json_data["experiment_dir"]
-        print(f"📌 Using provided experiment_dir: {experiment_dir}")
+    subject_id=str(
+        json_data.get(
+            "subject_id",
+            sub.removesuffix("REST")
+        )
+    ).strip().upper()
+
+    timestamp=datetime.now().strftime(
+        "%Y%m%d%H%M%S"
+    )
+
+    recording_name=sub
+
+    pipeline_info=load_pipeline_version()
+    json_data.update(
+        pipeline_info
+    )
+
+    json_data["subject"]=sub
+    json_data["subject_id"]=subject_id
+    json_data["recording_name"]=recording_name
+    json_data["pipeline_timestamp"]=timestamp
+
+    if json_data.get("experiment_dir"):
+        experiment_dir=str(
+            Path(
+                json_data["experiment_dir"]
+            )
+            .expanduser()
+            .resolve()
+        )
+
+        print(
+            f"📌 Using provided experiment_dir: "
+            f"{experiment_dir}"
+        )
+
     else:
-        experiment_dir=os.path.join(json_data["mainDir"],f"{date}_{sub}")
-        print(f"📁 Generated experiment_dir: {experiment_dir}")
+        main_dir=Path(
+            json_data["mainDir"]
+        ).expanduser().resolve()
+
+        experiment_dir=str(
+            main_dir
+            /f"{timestamp}_{recording_name}"
+        )
+
+        print(
+            f"📁 Generated REST experiment_dir: "
+            f"{experiment_dir}"
+        )
 
     subdirs=[
         "1.basic",
         "2.trials",
         "3.detrend",
-        os.path.join("3.detrend","examples"),
+        os.path.join(
+            "3.detrend",
+            "examples"
+        ),
         "4.postICA",
         "5.Extra",
-        os.path.join("5.Extra","FE"),
+        os.path.join(
+            "5.Extra",
+            "FE"
+        ),
+        os.path.join(
+            "5.Extra",
+            "FE",
+            "PCIst"
+        ),
         "6.FOOOF",
-        "7.pkls",
+        "7.pkls"
     ]
 
-    os.makedirs(experiment_dir,exist_ok=True)
+    Path(
+        experiment_dir
+    ).mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     for subdir in subdirs:
-        os.makedirs(os.path.join(experiment_dir,subdir),exist_ok=True)
+        Path(
+            experiment_dir,
+            subdir
+        ).mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
     json_data["experiment_dir"]=experiment_dir
     json_data["rest_directory_structure"]=subdirs
 
-    with open(Path(experiment_dir)/f"{sub}_pars.json","w") as json_file:
-        json.dump(make_json_serializable(json_data),json_file,indent=4,sort_keys=True)
+    with open(
+        Path(
+            experiment_dir
+        )/f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            make_json_serializable(
+                json_data
+            ),
+            json_file,
+            indent=4,
+            sort_keys=True
+        )
 
     return json_data,experiment_dir,sub
+
+
+def load_pipeline_version(version_file=None):
+    from pathlib import Path
+
+    if version_file is None:
+        version_file=Path(__file__).resolve().parent/"TMSpathPipeline_versions.txt"
+    else:
+        version_file=Path(version_file).expanduser().resolve()
+
+    if not version_file.exists():
+        raise FileNotFoundError(
+            f"File versioni non trovato: {version_file}"
+        )
+
+    lines=[
+        line.strip()
+        for line in version_file.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    if not lines:
+        raise ValueError(
+            f"Il file versioni è vuoto: {version_file}"
+        )
+
+    fields=[
+        field.strip()
+        for field in lines[-1].split("|")
+    ]
+
+    if len(fields)!=3:
+        raise ValueError(
+            "L'ultima riga deve avere il formato "
+            "YYYY-MM-DD|nome_pipeline|versione"
+        )
+
+    release_date,pipeline_name,pipeline_version=fields
+
+    return {
+        "pipeline_name":pipeline_name,
+        "pipeline_version":pipeline_version,
+        "pipeline_release_date":release_date,
+        "pipeline_version_file":str(version_file),
+        "pipeline_version_record":lines[-1]
+    }
+
 
 """
 def directorySetup(json_data):
@@ -1913,36 +2044,37 @@ def auto_detect_rest_bad_channels_segments(
         json_data
     )
 
-def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
-                      FIGSIZE=(13, 6),
-                      computeFOOOF=False):
-
+def computeBasicSteps(raw,events,json_data,experiment_dir,sub,FIGSIZE=(13,6),computeFOOOF=False):
     import json
     import pickle
     from pathlib import Path
 
-    experiment_dir = str(
-        Path(json_data.get("experiment_dir", experiment_dir))
+    experiment_dir=str(
+        Path(json_data.get("experiment_dir",experiment_dir))
         .expanduser()
         .resolve()
     )
-    json_data["experiment_dir"] = experiment_dir
+    json_data["experiment_dir"]=experiment_dir
 
-    eeg_type = json_data.get("eeg_type", json_data.get("EEGTYPE", "tms")).lower()
+    eeg_type=json_data.get(
+        "eeg_type",
+        json_data.get("EEGTYPE","tms")
+    ).lower()
 
-    if eeg_type != "rest":
+    if eeg_type!="rest":
         raise ValueError(
             "Questa computeBasicSteps è REST-only. "
             "Per TEP usa tmspath_utils.py."
         )
 
-    print(f"🧠 [{sub}] REST basic pipeline: raw continuum only + free annotations")
+    print(f"🧠 [{sub}] REST basic pipeline: raw continuum")
 
-    paths = rest_paths(experiment_dir)
+    paths=rest_paths(experiment_dir)
 
-    if json_data.get("do_filter_and_plot_raw", True):
+    if json_data.get("do_filter_and_plot_raw",True):
         print(f"🔧 [{sub}] Step 1 REST: filtro continuo")
-        raw = filter_and_plot_raw(
+
+        raw=filter_and_plot_raw(
             raw=raw,
             json_data=json_data,
             experiment_dir=experiment_dir,
@@ -1953,18 +2085,22 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
 
     if json_data.get("do_clean_trials_channels",True):
         raw_for_annotation=raw.copy().pick("eeg")
-    
-        if json_data.get(
-            "do_chan_trials_selection_automatic",
-            False
-        ):
+
+        automatic_selection=bool(
+            json_data.get(
+                "do_chan_trials_selection_automatic",
+                False
+            )
+        )
+
+        if automatic_selection:
             print(
                 f"🔧 [{sub}] Step 2A REST: "
                 "rilevamento automatico canali e finestre BAD"
             )
-    
+
             (
-                raw_for_annotation,
+                raw_clean,
                 df_auto_channels,
                 df_auto_windows,
                 json_data
@@ -1991,7 +2127,6 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
                         3.5
                     )
                 ),
-
                 protect_seed_channels=bool(
                     json_data.get(
                         "rest_auto_protect_seed_channels",
@@ -2000,93 +2135,136 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
                 ),
                 save=True
             )
-    
+
+            json_data["rest_manual_review_done"]=False
+            json_data["rest_cleaning_mode"]="automatic"
+
+            print(f"✅ [{sub}] REST automatic cleaning completato")
+            print(f"⏭️ [{sub}] GUI manuale trial/canali saltata")
+
         else:
             print(
-                f"⏭️ [{sub}] REST: "
-                "rilevamento automatico disattivato"
+                f"🔧 [{sub}] Step 2B REST: "
+                "revisione manuale delle annotazioni e dei canali"
             )
-    
-        print(
-            f"🔧 [{sub}] Step 2B REST: "
-            "revisione manuale delle annotazioni e dei canali"
-        )
-    
-        raw_clean,json_data=annotate_rest_bad_segments_free(
-            raw=raw_for_annotation,
-            json_data=json_data,
-            experiment_dir=experiment_dir,
-            sub=sub,
-            h_freq_vis=json_data.get(
-                "rest_annotation_h_freq_vis",
-                60
-            ),
-            scaling=json_data.get(
-                "rest_gui_scaling",
-                50e-6
-            ),
-            save=True,
-            note="free_annotations"
-        )
 
-    
+            raw_clean,json_data=annotate_rest_bad_segments_free(
+                raw=raw_for_annotation,
+                json_data=json_data,
+                experiment_dir=experiment_dir,
+                sub=sub,
+                h_freq_vis=json_data.get(
+                    "rest_annotation_h_freq_vis",
+                    60
+                ),
+                scaling=json_data.get(
+                    "rest_gui_scaling",
+                    50e-6
+                ),
+                save=True,
+                note="free_annotations"
+            )
+
+            json_data["rest_manual_review_done"]=True
+            json_data["rest_cleaning_mode"]="manual"
+
     else:
         print(f"⏭️ [{sub}] REST: salto annotazione BAD")
-        raw_clean = raw.copy().pick("eeg")
-        raw_clean.info["bads"] = json_data.get("bad_channels", [])
 
-        json_data["rest_bad_segment_mode"] = "none"
-        json_data["rest_free_annotations_tot"] = int(len(raw_clean.annotations))
-        json_data["rest_free_bad_annotations_tot"] = 0
-        json_data["rest_free_bad_seconds"] = 0.0
-        json_data["rest_free_bad_channels"] = list(raw_clean.info.get("bads", []))
+        raw_clean=raw.copy().pick("eeg")
+        raw_clean.info["bads"]=json_data.get(
+            "bad_channels",
+            []
+        )
 
-    if json_data.get("do_rest_detrend", False):
-        print(f"🔧 [{sub}] Step 3 REST: detrend polinomiale continuo / DC correction")
-        raw_clean, json_data = detrend_rest_raw_poly(
+        json_data["rest_bad_segment_mode"]="none"
+        json_data["rest_free_annotations_tot"]=int(
+            len(raw_clean.annotations)
+        )
+        json_data["rest_free_bad_annotations_tot"]=0
+        json_data["rest_free_bad_seconds"]=0.0
+        json_data["rest_free_bad_channels"]=list(
+            raw_clean.info.get("bads",[])
+        )
+        json_data["rest_manual_review_done"]=False
+        json_data["rest_cleaning_mode"]="none"
+
+    if json_data.get("do_rest_detrend",False):
+        print(
+            f"🔧 [{sub}] Step 3 REST: "
+            "detrend polinomiale continuo / DC correction"
+        )
+
+        raw_clean,json_data=detrend_rest_raw_poly(
             raw_clean=raw_clean,
             json_data=json_data,
             experiment_dir=experiment_dir,
             sub=sub
         )
+
     else:
-        print(f"⏭️ [{sub}] REST: salto detrend continuo / DC correction")
+        print(
+            f"⏭️ [{sub}] REST: "
+            "salto detrend continuo / DC correction"
+        )
 
-    json_data["rest_pipeline_mode"] = "raw_continuum_filter_freeAnnotation_detrend"
-    json_data["raw_object_type"] = "Raw_REST_clean_freeAnnotated"
-    json_data["segments_object_type"] = "None"
-    json_data["epochs_object_type"] = "None"
-    json_data["rest_fixed_epochs_created"] = False
-    json_data["rest_segment_duration"] = None
-    json_data["rest_segment_overlap"] = None
+    json_data["rest_pipeline_mode"]="raw_continuum_filter_clean_detrend"
+    json_data["raw_object_type"]="Raw_REST_clean"
+    json_data["segments_object_type"]="None"
+    json_data["epochs_object_type"]="None"
+    json_data["rest_fixed_epochs_created"]=False
+    json_data["rest_segment_duration"]=None
+    json_data["rest_segment_overlap"]=None
 
-    if json_data.get("do_rest_detrend", False):
-        json_data["raw_object_type"] = "Raw_REST_clean_freeAnnotated_detrended"
+    if json_data.get("do_rest_detrend",False):
+        json_data["raw_object_type"]="Raw_REST_clean_detrended"
 
-    bad_annotations = [
-        ann for ann in raw_clean.annotations
-        if str(ann["description"]).startswith("BAD")
+    bad_annotations=[
+        annotation
+        for annotation in raw_clean.annotations
+        if str(annotation["description"]).startswith("BAD")
     ]
 
-    json_data["bad_channels"] = list(raw_clean.info.get("bads", []))
-    json_data["rest_bad_annotations_tot"] = int(len(bad_annotations))
-    json_data["rest_bad_seconds"] = float(sum([ann["duration"] for ann in bad_annotations]))
+    json_data["bad_channels"]=list(
+        raw_clean.info.get("bads",[])
+    )
+    json_data["rest_bad_annotations_tot"]=int(
+        len(bad_annotations)
+    )
+    json_data["rest_bad_seconds"]=float(
+        sum(
+            float(annotation["duration"])
+            for annotation in bad_annotations
+        )
+    )
 
-    with open(paths["pkls"] / f"{sub}_raw_REST_clean.pkl", "wb") as f:
-        pickle.dump(raw_clean, f)
+    with open(
+        paths["pkls"]/f"{sub}_raw_REST_clean.pkl",
+        "wb"
+    ) as file:
+        pickle.dump(
+            raw_clean,
+            file
+        )
 
     raw_clean.save(
-        paths["pkls"] / f"{sub}_raw_REST_clean.fif",
+        paths["pkls"]/f"{sub}_raw_REST_clean.fif",
         overwrite=True
     )
 
-    ann_df = raw_clean.annotations.to_data_frame()
-    ann_df.to_csv(
-        paths["trials"] / f"{sub}_REST_annotations_final.csv",
+    annotations_dataframe=(
+        raw_clean.annotations.to_data_frame()
+    )
+
+    annotations_dataframe.to_csv(
+        paths["trials"]/f"{sub}_REST_annotations_final.csv",
         index=False
     )
 
-    with open(Path(experiment_dir) / f"{sub}_pars.json", "w") as json_file:
+    with open(
+        Path(experiment_dir)/f"{sub}_pars.json",
+        "w"
+    ) as json_file:
         json.dump(
             make_json_serializable(json_data),
             json_file,
@@ -2096,15 +2274,17 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
 
     print(f"✅ [{sub}] REST basic preprocessing completato")
     print(f"   raw_clean:        {type(raw_clean)}")
-    print(f"   bad channels:     {json_data.get('bad_channels', [])}")
-    print(f"   BAD annotations:  {json_data.get('rest_bad_annotations_tot', 0)}")
-    print(f"   BAD seconds:      {json_data.get('rest_bad_seconds', 0):.2f}")
-    print(f"   rest detrend:     {json_data.get('do_rest_detrend', False)}")
-    print(f"   detrend order:    {json_data.get('rest_detrend_order', 'NA')}")
+    print(f"   cleaning mode:    {json_data.get('rest_cleaning_mode')}")
+    print(f"   manual GUI:       {json_data.get('rest_manual_review_done')}")
+    print(f"   bad channels:     {json_data.get('bad_channels',[])}")
+    print(f"   BAD annotations:  {json_data.get('rest_bad_annotations_tot',0)}")
+    print(f"   BAD seconds:      {json_data.get('rest_bad_seconds',0):.2f}")
+    print(f"   rest detrend:     {json_data.get('do_rest_detrend',False)}")
+    print(f"   detrend order:    {json_data.get('rest_detrend_order','NA')}")
     print(f"   fixed epochs:     False")
     print(f"   5s segments:      False")
 
-    return raw_clean, json_data
+    return raw_clean,json_data
 
 def make_rest_fixed_epochs(raw_clean,json_data,experiment_dir,sub):
     import mne
@@ -3411,7 +3591,7 @@ def ICAcontinuum_manual_from_computeBasicSteps(
     label_prob_threshold=0.80,
     autoReject=True,
     manualCheck=True,
-    show_components=True,
+    show_components=False,
     show_all_properties=False,
     property_picks=None,
     save=True
@@ -3445,7 +3625,8 @@ def ICAcontinuum_manual_from_computeBasicSteps(
     raw_ica=raw_clean.copy().pick("eeg")
 
     bad_channels=[
-        ch for ch in json_data.get("bad_channels",[])
+        ch
+        for ch in json_data.get("bad_channels",[])
         if ch in raw_ica.ch_names
     ]
 
@@ -3456,6 +3637,12 @@ def ICAcontinuum_manual_from_computeBasicSteps(
         eeg=True,
         exclude="bads"
     )
+
+    if len(picks_ica)<2:
+        raise ValueError(
+            f"Numero insufficiente di canali EEG buoni per ICA: "
+            f"{len(picks_ica)}"
+        )
 
     print("Bad channels esclusi da ICA:",bad_channels)
     print("Canali usati per ICA:",len(picks_ica))
@@ -3493,8 +3680,15 @@ def ICAcontinuum_manual_from_computeBasicSteps(
     probs=ic_labels["y_pred_proba"]
 
     for i,label in enumerate(labels):
-        prob=float(np.max(np.atleast_1d(probs[i])))
-        print(i,label,prob)
+        probability=float(
+            np.max(
+                np.atleast_1d(
+                    probs[i]
+                )
+            )
+        )
+
+        print(i,label,probability)
 
     artifact_tags=[
         "eye blink",
@@ -3505,7 +3699,7 @@ def ICAcontinuum_manual_from_computeBasicSteps(
     ]
 
     iclabel_suggested=[]
-    
+
     for i,label in enumerate(labels):
         probability=float(
             np.max(
@@ -3514,51 +3708,94 @@ def ICAcontinuum_manual_from_computeBasicSteps(
                 )
             )
         )
-    
+
         if (
             label in artifact_tags
-            and probability>=label_prob_threshold
+            and probability>=float(label_prob_threshold)
         ):
             iclabel_suggested.append(i)
-    
+
     print(
         "Componenti artefattuali suggerite da ICLabel:",
         iclabel_suggested
     )
-    
+
     if autoReject:
-        auto_exclude=iclabel_suggested.copy()
+        auto_exclude=sorted(
+            int(x)
+            for x in iclabel_suggested
+        )
     else:
         auto_exclude=[]
-    
-    ica.exclude=[]
+
+    ica.exclude=auto_exclude.copy()
+
+    topo_selected=[]
+    psd_selected=[]
+    manual_exclude=[]
 
     if manualCheck:
-        final_exclude,kept,topo_selected,psd_selected=(
-            select_ica_components_topo_psd_gui(
-                ica=ica,
-                raw_ica=raw_ica_fit,
-                labels=labels,
-                probabilities=probs,
-                preselected=iclabel_suggested,
-                combine_mode="PSD_FINAL",
-                ncols_topo=8,
-                ncols_psd=4,
-                nrows_psd=3,
-                fmin=0.5,
-                fmax=50
-            )
+        (
+            final_exclude,
+            kept,
+            topo_selected,
+            psd_selected
+        )=select_ica_components_topo_psd_gui(
+            ica=ica,
+            raw_ica=raw_ica_fit,
+            labels=labels,
+            probabilities=probs,
+            preselected=auto_exclude,
+            combine_mode="PSD_FINAL",
+            ncols_topo=8,
+            ncols_psd=4,
+            nrows_psd=3,
+            fmin=0.5,
+            fmax=50
         )
-        
-        ica.exclude=[
+
+        ica.exclude=sorted(
             int(x)
             for x in final_exclude
+        )
+
+        manual_exclude=sorted(
+            set(ica.exclude)-set(auto_exclude)
+        )
+
+        print(
+            "Componenti selezionate da topografia:",
+            topo_selected
+        )
+        print(
+            "Componenti selezionate da PSD:",
+            psd_selected
+        )
+        print(
+            "Componenti finali escluse:",
+            ica.exclude
+        )
+        print(
+            "Componenti tenute:",
+            kept
+        )
+
+    else:
+        kept=[
+            component
+            for component in range(ica.n_components_)
+            if component not in ica.exclude
         ]
-    
-        print("Componenti selezionate da topografia:",topo_selected)
-        print("Componenti selezionate da PSD:",psd_selected)
-        print("Componenti finali escluse:",ica.exclude)
-        print("Componenti tenute:",kept)
+
+        print("⏭️ Controllo manuale ICA disattivato")
+        print(
+            "Componenti escluse automaticamente:",
+            ica.exclude
+        )
+        print(
+            "Componenti tenute:",
+            kept
+        )
 
     if show_components:
         n_comp=ica.n_components_
@@ -3571,126 +3808,244 @@ def ICAcontinuum_manual_from_computeBasicSteps(
                 inst=raw_ica_fit,
                 ch_type="eeg",
                 plot_std=True,
-                psd_args=dict(fmin=0.5,fmax=50),
+                psd_args={
+                    "fmin":0.5,
+                    "fmax":50
+                },
                 show=True
             )
 
     if property_picks is not None:
-        for ic in property_picks:
-            print("IC",ic,labels[ic],float(np.max(np.atleast_1d(probs[ic]))))
+        for component in property_picks:
+            print(
+                "IC",
+                component,
+                labels[component],
+                float(
+                    np.max(
+                        np.atleast_1d(
+                            probs[component]
+                        )
+                    )
+                )
+            )
 
             ica.plot_properties(
                 inst=raw_ica_fit,
-                picks=[ic],
+                picks=[component],
                 dB=False,
                 plot_std=True,
                 log_scale=True,
-                psd_args=dict(fmin=0.5,fmax=50),
+                psd_args={
+                    "fmin":0.5,
+                    "fmax":50
+                },
                 reject_by_annotation=True,
                 show=True
             )
 
     if show_all_properties:
-        for ic in range(ica.n_components_):
-            print("IC",ic,labels[ic],float(np.max(np.atleast_1d(probs[ic]))))
+        for component in range(ica.n_components_):
+            print(
+                "IC",
+                component,
+                labels[component],
+                float(
+                    np.max(
+                        np.atleast_1d(
+                            probs[component]
+                        )
+                    )
+                )
+            )
 
             ica.plot_properties(
-                inst=raw_ica,
-                picks=[ic],
+                inst=raw_ica_fit,
+                picks=[component],
                 dB=False,
                 plot_std=True,
                 log_scale=True,
-                psd_args=dict(fmin=0.5,fmax=50),
+                psd_args={
+                    "fmin":0.5,
+                    "fmax":50
+                },
                 reject_by_annotation=True,
                 show=True
             )
 
-    manual_exclude=[]
-    
-    if not manualCheck:
-        manual=input("Componenti da escludere, separate da virgola: ")
-    
-        if manual.strip()!="":
-            manual_exclude=[
-                int(x.strip())
-                for x in manual.split(",")
-                if x.strip().isdigit()
-            ]
-        else:
-            manual_exclude=[]
-    
-        ica.exclude=sorted(set(list(ica.exclude)+manual_exclude))
-    
-    print("Componenti finali escluse:",ica.exclude)
+    ica.exclude=sorted(
+        int(x)
+        for x in ica.exclude
+    )
+
+    print(
+        "Componenti finali escluse:",
+        ica.exclude
+    )
 
     postICA_raw_continuum=raw_ica.copy()
 
-    ica.apply(postICA_raw_continuum)
-
-    postICA_raw_continuum.plot(
-        n_channels=min(32,len(postICA_raw_continuum.ch_names)),
-        scalings={"eeg":50e-6}
+    ica.apply(
+        postICA_raw_continuum
     )
+
+    if json_data.get(
+        "show_postICA_preview",
+        False
+    ):
+        postICA_raw_continuum.plot(
+            n_channels=min(
+                32,
+                len(postICA_raw_continuum.ch_names)
+            ),
+            scalings={
+                "eeg":50e-6
+            },
+            block=False,
+            show=True
+        )
+
+        plt.show(
+            block=True
+        )
 
     postICA_final=postICA_raw_continuum.copy()
 
     postICA_final.info["bads"]=bad_channels
 
     if len(bad_channels)>0:
-        postICA_final.interpolate_bads(reset_bads=True)
+        postICA_final.interpolate_bads(
+            reset_bads=True
+        )
 
-    postICA_final.set_eeg_reference("average")
+    postICA_final.set_eeg_reference(
+        "average"
+    )
 
-    timestamp=datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp=datetime.now().strftime(
+        "%Y%m%d%H%M%S"
+    )
 
     json_data["ICA_fit_space"]="raw_continuum"
-    json_data["ICA_components_tot"]=int(ica.n_components_)
-    json_data["ICA_autoExcludedComponents"]=[int(x) for x in auto_exclude]
-    json_data["ICA_manualAddedComponents"]=[int(x) for x in manual_exclude]
-    json_data["ICA_excludedComponents"]=[int(x) for x in ica.exclude]
-    json_data["ICA_labels"]=[str(x) for x in labels]
+    json_data["ICA_components_tot"]=int(
+        ica.n_components_
+    )
+    json_data["ICA_autoExcludedComponents"]=[
+        int(x)
+        for x in auto_exclude
+    ]
+    json_data["ICA_manualAddedComponents"]=[
+        int(x)
+        for x in manual_exclude
+    ]
+    json_data["ICA_excludedComponents"]=[
+        int(x)
+        for x in ica.exclude
+    ]
+    json_data["ICA_keptComponents"]=[
+        int(x)
+        for x in kept
+    ]
+    json_data["ICA_labels"]=[
+        str(x)
+        for x in labels
+    ]
     json_data["ICA_label_probabilities"]=[
-        float(np.max(np.atleast_1d(p)))
+        float(
+            np.max(
+                np.atleast_1d(p)
+            )
+        )
         for p in probs
     ]
     json_data["ICA_bad_channels_excluded_from_fit"]=bad_channels
     json_data["channel_interpolation_timing"]="after_ica"
     json_data["reference_after_ica"]="average"
     json_data["ICA_timestamp"]=timestamp
+    json_data["ICA_manualCheck"]=bool(manualCheck)
+    json_data["ICA_automaticRejection"]=bool(autoReject)
+    json_data["ICA_label_probability_threshold"]=float(
+        label_prob_threshold
+    )
+
     if manualCheck:
-        json_data["ICA_topoSelectedComponents"]=[int(x) for x in topo_selected]
-        json_data["ICA_psdSelectedComponents"]=[int(x) for x in psd_selected]
-        json_data["ICA_manualCombinationMode"]="OR"
-        json_data["ICA_keptComponents"]=[int(x) for x in kept]
+        json_data["ICA_topoSelectedComponents"]=[
+            int(x)
+            for x in topo_selected
+        ]
+        json_data["ICA_psdSelectedComponents"]=[
+            int(x)
+            for x in psd_selected
+        ]
+        json_data["ICA_manualCombinationMode"]="PSD_FINAL"
+    else:
+        json_data["ICA_topoSelectedComponents"]=[]
+        json_data["ICA_psdSelectedComponents"]=[]
+        json_data["ICA_manualCombinationMode"]="none"
+
     if save:
-        ica_path=paths["pkls"]/f"{timestamp}_{sub}_ica_model_continuum.pkl"
-        raw_path=paths["pkls"]/f"{timestamp}_{sub}_postICA_raw_continuum.pkl"
-        final_path=paths["pkls"]/f"{timestamp}_{sub}_postICA_final.pkl"
+        ica_path=(
+            paths["pkls"]
+            /f"{timestamp}_{sub}_ica_model_continuum.pkl"
+        )
+        raw_path=(
+            paths["pkls"]
+            /f"{timestamp}_{sub}_postICA_raw_continuum.pkl"
+        )
+        final_path=(
+            paths["pkls"]
+            /f"{timestamp}_{sub}_postICA_final.pkl"
+        )
 
-        with open(ica_path,"wb") as f:
-            pickle.dump(ica,f)
+        with open(ica_path,"wb") as file:
+            pickle.dump(
+                ica,
+                file
+            )
 
-        with open(raw_path,"wb") as f:
-            pickle.dump(postICA_raw_continuum,f)
+        with open(raw_path,"wb") as file:
+            pickle.dump(
+                postICA_raw_continuum,
+                file
+            )
 
-        with open(final_path,"wb") as f:
-            pickle.dump(postICA_final,f)
+        with open(final_path,"wb") as file:
+            pickle.dump(
+                postICA_final,
+                file
+            )
 
         postICA_final.save(
-            paths["pkls"]/f"{timestamp}_{sub}_postICA_final.fif",
+            paths["pkls"]
+            /f"{timestamp}_{sub}_postICA_final.fif",
             overwrite=True
         )
 
-        with open(Path(experiment_dir)/f"{sub}_pars.json","w") as f:
-            json.dump(make_json_serializable(json_data),f,indent=4,sort_keys=True)
+        with open(
+            Path(experiment_dir)
+            /f"{sub}_pars.json",
+            "w"
+        ) as file:
+            json.dump(
+                make_json_serializable(
+                    json_data
+                ),
+                file,
+                indent=4,
+                sort_keys=True
+            )
 
         print("Salvato:")
         print(ica_path)
         print(raw_path)
         print(final_path)
 
-    return postICA_final,postICA_raw_continuum,ica,json_data
-
+    return (
+        postICA_final,
+        postICA_raw_continuum,
+        ica,
+        json_data
+    )
 
 def run_rest_ica(
     raw_clean,
@@ -9141,6 +9496,880 @@ def plot_TEP_1d_with_shading(epochs, output_path):
 
 
 
+
+
+def compute_rest_random_pcist_null(
+    raw_rest,
+    reference_epochs,
+    json_data,
+    experiment_dir,
+    sub,
+    pcist_module_name="tmspath_utils",
+    n_replicates=100,
+    random_seed=42,
+    tmin=-0.1,
+    tmax=0.4,
+    baseline=(-0.1,-0.01),
+    pcist_baseline_window_ms=(-100,-10),
+    pcist_response_window_ms=(10,300),
+    save=True
+):
+    import importlib
+    import json
+    import shutil
+    import tempfile
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import mne
+    from pathlib import Path
+
+    experiment_dir=Path(json_data.get("experiment_dir",experiment_dir)).expanduser().resolve()
+    out_dir=experiment_dir/"5.Extra"/"FE"/"PCIst"
+    out_dir.mkdir(parents=True,exist_ok=True)
+
+    raw_in=raw_rest.copy().pick("eeg").load_data()
+    sfreq=float(raw_in.info["sfreq"])
+    n_times=int(raw_in.n_times)
+    first_samp=int(raw_in.first_samp)
+    start_margin=int(np.ceil(abs(float(tmin))*sfreq))
+    stop_margin=int(np.ceil(float(tmax)*sfreq))
+
+    valid=np.ones(n_times,dtype=bool)
+    valid[:start_margin]=False
+    valid[max(0,n_times-stop_margin):]=False
+
+    for ann in raw_in.annotations:
+        if not str(ann["description"]).startswith("BAD"):
+            continue
+        start=int(np.floor(float(ann["onset"])*sfreq))-stop_margin
+        stop=int(np.ceil((float(ann["onset"])+float(ann["duration"]))*sfreq))+start_margin
+        start=max(0,start)
+        stop=min(n_times,stop)
+        valid[start:stop]=False
+
+    candidate_samples=np.flatnonzero(valid)+first_samp
+    if candidate_samples.size==0:
+        raise ValueError("Nessun campione valido disponibile per i trigger casuali REST.")
+
+    pcist_module=importlib.import_module(pcist_module_name)
+    if not hasattr(pcist_module,"compute_pcist"):
+        raise AttributeError(f"{pcist_module_name} non espone compute_pcist().")
+
+    rng=np.random.default_rng(int(random_seed))
+    rows=[]
+    distributions={}
+
+    json_pcist=json_data.copy()
+    json_pcist["pcist_baseline_window_ms"]=tuple(pcist_baseline_window_ms)
+    json_pcist["pcist_response_window_ms"]=tuple(pcist_response_window_ms)
+    json_pcist.setdefault("pcist_k",1.2)
+    json_pcist.setdefault("pcist_min_snr",1.1)
+    json_pcist.setdefault("pcist_max_var",99)
+    json_pcist.setdefault("pcist_embed",False)
+    json_pcist.setdefault("pcist_n_steps",100)
+    json_pcist.setdefault("pcist_baseline_corr",False)
+
+    for side,epochs_ref in reference_epochs.items():
+        n_events=int(len(epochs_ref))
+        if n_events<1:
+            raise ValueError(f"Nessuna epoca di riferimento per {side}.")
+        replace=n_events>candidate_samples.size
+        values=[]
+        dims=[]
+
+        with tempfile.TemporaryDirectory(prefix=f"pcist_random_{side}_") as temp_root:
+            temp_root=Path(temp_root)
+            for replicate in range(int(n_replicates)):
+                selected=np.sort(rng.choice(candidate_samples,size=n_events,replace=replace))
+                events=np.column_stack([
+                    selected.astype(int),
+                    np.zeros(n_events,dtype=int),
+                    np.full(n_events,990 if side=="SX" else 991,dtype=int)
+                ])
+                epochs_random=mne.Epochs(
+                    raw_in,
+                    events,
+                    event_id=int(990 if side=="SX" else 991),
+                    tmin=float(tmin),
+                    tmax=float(tmax),
+                    baseline=baseline,
+                    detrend=None,
+                    preload=True,
+                    reject_by_annotation=True,
+                    event_repeated="drop",
+                    verbose=False
+                ).pick("eeg")
+
+                if len(epochs_random)==0:
+                    rows.append({
+                        "subject":sub,"side":side,"replicate":replicate+1,
+                        "n_requested":n_events,"n_kept":0,"PCIst":np.nan,"n_dims":np.nan,
+                        "status":"no_epochs"
+                    })
+                    continue
+
+                replicate_dir=temp_root/f"rep_{replicate+1:03d}"
+                replicate_dir.mkdir(parents=True,exist_ok=True)
+                pci_value,result,_=pcist_module.compute_pcist(
+                    epochs_random,
+                    json_pcist.copy(),
+                    replicate_dir,
+                    f"{sub}_REST_RANDOM_{side}_{replicate+1:03d}"
+                )
+                value=float(pci_value)
+                n_dims=int(result["n_dims"])
+                values.append(value)
+                dims.append(n_dims)
+                rows.append({
+                    "subject":sub,"side":side,"replicate":replicate+1,
+                    "n_requested":n_events,"n_kept":int(len(epochs_random)),
+                    "PCIst":value,"n_dims":n_dims,"status":"ok"
+                })
+                shutil.rmtree(replicate_dir,ignore_errors=True)
+
+        values=np.asarray(values,dtype=float)
+        dims=np.asarray(dims,dtype=float)
+        distributions[side]={
+            "n_replicates_requested":int(n_replicates),
+            "n_replicates_valid":int(np.isfinite(values).sum()),
+            "n_events_per_replicate":n_events,
+            "mean":float(np.nanmean(values)),
+            "std":float(np.nanstd(values,ddof=1)) if values.size>1 else 0.0,
+            "median":float(np.nanmedian(values)),
+            "p2_5":float(np.nanpercentile(values,2.5)),
+            "p5":float(np.nanpercentile(values,5)),
+            "p95":float(np.nanpercentile(values,95)),
+            "p97_5":float(np.nanpercentile(values,97.5)),
+            "min":float(np.nanmin(values)),
+            "max":float(np.nanmax(values)),
+            "mean_n_dims":float(np.nanmean(dims))
+        }
+
+        fig,ax=plt.subplots(figsize=(9,6))
+        ax.hist(values,bins=min(20,max(5,int(np.sqrt(max(1,values.size))))))
+        ax.axvline(distributions[side]["mean"],linestyle="--",linewidth=2,label="mean")
+        ax.axvline(distributions[side]["p95"],linestyle=":",linewidth=2,label="95th percentile")
+        ax.set_xlabel("Random REST PCIst")
+        ax.set_ylabel("Replicates")
+        ax.set_title(f"{sub} REST random-trigger PCIst {side} | n={values.size}")
+        mean_value=distributions[side]["mean"]
+        p95_value=distributions[side]["p95"]
+        ax.set_title(
+            f"{sub} REST random-trigger PCIst {side} | "
+            f"n={values.size} | mean={mean_value:.3f} | p95={p95_value:.3f}"
+        )        
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out_dir/f"{sub}_REST_RANDOM_{side}_PCIst_distribution.png",dpi=300,bbox_inches="tight")
+        plt.close(fig)
+        np.save(out_dir/f"{sub}_REST_RANDOM_{side}_PCIst_values.npy",values)
+
+    df=pd.DataFrame(rows)
+    summary=pd.DataFrame([{"subject":sub,"side":side,**stats} for side,stats in distributions.items()])
+
+    if save:
+        df.to_csv(out_dir/f"{sub}_REST_RANDOM_PCIst_replicates.csv",index=False)
+        summary.to_csv(out_dir/f"{sub}_REST_RANDOM_PCIst_summary.csv",index=False)
+        with open(out_dir/f"{sub}_REST_RANDOM_PCIst_summary.json","w") as f:
+            json.dump(make_json_serializable(distributions),f,indent=4,sort_keys=True)
+
+    json_data["REST_random_PCIst_computed"]=True
+    json_data["REST_random_PCIst_replicates"]=int(n_replicates)
+    json_data["REST_random_PCIst_seed"]=int(random_seed)
+    json_data["REST_random_PCIst_dir"]=str(out_dir)
+    json_data["REST_random_PCIst_summary"]=distributions
+
+    return df,summary,distributions,json_data
+
+def extractRestFeatures(
+    postICA_rest,
+    json_data,
+    experiment_dir,
+    sub,
+    preICA_rest=None,
+    compute_bands=True,
+    compute_band_comparison=True,
+    compute_null_pcist=True,
+    compute_random_pcist=True,
+    random_pcist_replicates=100,
+    random_pcist_seed=42,
+    pcist_module_name="tmspath_utils",
+    tmin=-0.1,
+    tmax=0.4,
+    baseline=(-0.1,-0.01),
+    pcist_baseline_window_ms=(-100,-10),
+    pcist_response_window_ms=(10,300),
+    save=True
+):
+    import importlib
+    import json
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+
+    experiment_dir=Path(
+        json_data.get("experiment_dir",experiment_dir)
+    ).expanduser().resolve()
+
+    json_data["experiment_dir"]=str(experiment_dir)
+
+    feature_dir=experiment_dir/"5.Extra"/"FE"/"REST"
+    feature_dir.mkdir(parents=True,exist_ok=True)
+
+    pcist_dir=experiment_dir/"5.Extra"/"FE"/"PCIst"
+    pcist_dir.mkdir(parents=True,exist_ok=True)
+
+    legacy_random_dir=experiment_dir/"5.Extra"/"FE"/"REST"/"RANDOM_PCIst"
+    if legacy_random_dir.exists():
+        import shutil
+        shutil.rmtree(legacy_random_dir,ignore_errors=True)
+
+    compute_bands=bool(
+        json_data.get(
+            "rest_compute_bands",
+            compute_bands
+        )
+    )
+
+    compute_band_comparison=bool(
+        json_data.get(
+            "rest_compute_band_comparison",
+            compute_band_comparison
+        )
+    )
+
+    compute_null_pcist=bool(
+        json_data.get(
+            "rest_compute_null_pcist",
+            compute_null_pcist
+        )
+    )
+
+    compute_random_pcist=bool(
+        json_data.get(
+            "rest_compute_random_pcist",
+            compute_random_pcist
+        )
+    )
+
+    random_pcist_replicates=int(
+        json_data.get(
+            "rest_random_pcist_replicates",
+            random_pcist_replicates
+        )
+    )
+
+    random_pcist_seed=int(
+        json_data.get(
+            "rest_random_pcist_seed",
+            random_pcist_seed
+        )
+    )
+
+    tmin=float(
+        json_data.get(
+            "epochs_timewindow_min",
+            tmin
+        )
+    )
+
+    tmax=float(
+        json_data.get(
+            "epochs_timewindow_max",
+            tmax
+        )
+    )
+
+    baseline_default=baseline
+
+    if baseline_default is None:
+        baseline_default=(None,None)
+
+    baseline_tmin=json_data.get(
+        "baseline_cor_tmin",
+        baseline_default[0]
+    )
+
+    baseline_tmax=json_data.get(
+        "baseline_cor_tmax",
+        baseline_default[1]
+    )
+
+    if baseline_tmin is None or baseline_tmax is None:
+        baseline=None
+    else:
+        baseline=(
+            max(float(baseline_tmin),tmin),
+            min(float(baseline_tmax),tmax)
+        )
+
+        if baseline[0]>baseline[1]:
+            baseline=None
+
+    pcist_baseline_window_ms=tuple(
+        json_data.get(
+            "pcist_baseline_window_ms",
+            pcist_baseline_window_ms
+        )
+    )
+
+    pcist_response_window_ms=tuple(
+        json_data.get(
+            "pcist_response_window_ms",
+            pcist_response_window_ms
+        )
+    )
+
+    json_data["rest_random_pcist_replicates"]=random_pcist_replicates
+    json_data["rest_random_pcist_seed"]=random_pcist_seed
+    json_data["pcist_baseline_window_ms"]=pcist_baseline_window_ms
+    json_data["pcist_response_window_ms"]=pcist_response_window_ms
+
+    print("REST feature configuration")
+    print("  compute_bands:",compute_bands)
+    print("  compute_band_comparison:",compute_band_comparison)
+    print("  compute_null_pcist:",compute_null_pcist)
+    print("  compute_random_pcist:",compute_random_pcist)
+    print("  random_pcist_replicates:",random_pcist_replicates)
+    print("  random_pcist_seed:",random_pcist_seed)
+    print("  epoch window:",tmin,tmax)
+    print("  epoch baseline:",baseline)
+    print("  PCIst baseline window [ms]:",pcist_baseline_window_ms)
+    print("  PCIst response window [ms]:",pcist_response_window_ms)
+
+    results={
+        "subject":sub,
+        "analysis_type":"REST_postICA_features",
+        "feature_directory":str(feature_dir),
+        "configuration":{
+            "compute_bands":compute_bands,
+            "compute_band_comparison":compute_band_comparison,
+            "compute_null_pcist":compute_null_pcist,
+            "compute_random_pcist":compute_random_pcist,
+            "random_pcist_replicates":random_pcist_replicates,
+            "random_pcist_seed":random_pcist_seed,
+            "tmin":tmin,
+            "tmax":tmax,
+            "baseline":baseline,
+            "pcist_baseline_window_ms":pcist_baseline_window_ms,
+            "pcist_response_window_ms":pcist_response_window_ms
+        },
+        "null_pcist_interpretation":(
+            "PCIst computed on resting-state epochs aligned to TEP trigger times. "
+            "This is a null/control complexity estimate, not an evoked perturbational PCI."
+        )
+    }
+
+    band_outputs={}
+
+    if compute_bands:
+        if preICA_rest is not None:
+            print("🔧 REST features: PSD bands pre-ICA")
+
+            (
+                psd_pre,
+                df_pre_raw,
+                df_pre_raw_long,
+                df_pre_apec,
+                df_pre_apec_long,
+                df_pre_aperiodic,
+                json_data
+            )=compute_rest_psd_bands(
+                preICA_rest,
+                json_data,
+                experiment_dir,
+                sub,
+                note="REST_preICA",
+                fmin=float(
+                    json_data.get(
+                        "rest_features_fmin",
+                        1.0
+                    )
+                ),
+                fmax=float(
+                    json_data.get(
+                        "rest_features_fmax",
+                        40.0
+                    )
+                ),
+                psd_fmax_plot=float(
+                    json_data.get(
+                        "rest_features_fmax",
+                        40.0
+                    )
+                ),
+                n_per_seg=int(
+                    json_data.get(
+                        "rest_features_n_per_seg",
+                        2000
+                    )
+                ),
+                n_overlap=int(
+                    json_data.get(
+                        "rest_features_n_overlap",
+                        0
+                    )
+                ),
+                n_fft=int(
+                    json_data.get(
+                        "rest_features_n_fft",
+                        2048
+                    )
+                ),
+                relative=bool(
+                    json_data.get(
+                        "rest_features_relative",
+                        True
+                    )
+                ),
+                remove_aperiodic=bool(
+                    json_data.get(
+                        "rest_features_remove_aperiodic",
+                        True
+                    )
+                ),
+                aperiodic_fit_fmin=float(
+                    json_data.get(
+                        "rest_features_aperiodic_fmin",
+                        1.0
+                    )
+                ),
+                aperiodic_fit_fmax=float(
+                    json_data.get(
+                        "rest_features_aperiodic_fmax",
+                        40.0
+                    )
+                ),
+                aperiodic_mode=str(
+                    json_data.get(
+                        "rest_features_aperiodic_mode",
+                        "fixed"
+                    )
+                ),
+                save=save,
+                show=False
+            )
+
+            band_outputs["preICA"]={
+                "raw":df_pre_raw,
+                "apec":df_pre_apec,
+                "aperiodic":df_pre_aperiodic
+            }
+
+        print("🔧 REST features: PSD bands post-ICA")
+
+        (
+            psd_post,
+            df_post_raw,
+            df_post_raw_long,
+            df_post_apec,
+            df_post_apec_long,
+            df_post_aperiodic,
+            json_data
+        )=compute_rest_psd_bands(
+            postICA_rest,
+            json_data,
+            experiment_dir,
+            sub,
+            note="REST_postICA",
+            fmin=float(
+                json_data.get(
+                    "rest_features_fmin",
+                    1.0
+                )
+            ),
+            fmax=float(
+                json_data.get(
+                    "rest_features_fmax",
+                    40.0
+                )
+            ),
+            psd_fmax_plot=float(
+                json_data.get(
+                    "rest_features_fmax",
+                    40.0
+                )
+            ),
+            n_per_seg=int(
+                json_data.get(
+                    "rest_features_n_per_seg",
+                    2000
+                )
+            ),
+            n_overlap=int(
+                json_data.get(
+                    "rest_features_n_overlap",
+                    0
+                )
+            ),
+            n_fft=int(
+                json_data.get(
+                    "rest_features_n_fft",
+                    2048
+                )
+            ),
+            relative=bool(
+                json_data.get(
+                    "rest_features_relative",
+                    True
+                )
+            ),
+            remove_aperiodic=bool(
+                json_data.get(
+                    "rest_features_remove_aperiodic",
+                    True
+                )
+            ),
+            aperiodic_fit_fmin=float(
+                json_data.get(
+                    "rest_features_aperiodic_fmin",
+                    1.0
+                )
+            ),
+            aperiodic_fit_fmax=float(
+                json_data.get(
+                    "rest_features_aperiodic_fmax",
+                    40.0
+                )
+            ),
+            aperiodic_mode=str(
+                json_data.get(
+                    "rest_features_aperiodic_mode",
+                    "fixed"
+                )
+            ),
+            save=save,
+            show=False
+        )
+
+        band_outputs["postICA"]={
+            "raw":df_post_raw,
+            "apec":df_post_apec,
+            "aperiodic":df_post_aperiodic
+        }
+
+        results["bands"]={
+            "preICA_computed":preICA_rest is not None,
+            "postICA_computed":True,
+            "postICA_raw_csv":json_data.get(
+                "PSD_REST_postICA_raw_bands_csv"
+            ),
+            "postICA_apec_csv":json_data.get(
+                "PSD_REST_postICA_corrected_bands_csv"
+            ),
+            "postICA_aperiodic_csv":json_data.get(
+                "PSD_REST_postICA_aperiodic_parameters_csv"
+            )
+        }
+
+        if compute_band_comparison and preICA_rest is not None:
+            print("🔧 REST features: confronto bande pre/post ICA")
+
+            (
+                df_compare_raw,
+                df_summary_raw,
+                json_data
+            )=compare_rest_bandpower_pre_post(
+                df_pre_raw,
+                df_post_raw,
+                json_data,
+                experiment_dir,
+                sub,
+                pre_label="REST_preICA_raw",
+                post_label="REST_postICA_raw",
+                save=save
+            )
+
+            results["band_comparison"]={
+                "raw_summary":json_data.get(
+                    "PSD_compare_REST_preICA_raw_vs_REST_postICA_raw_summary"
+                )
+            }
+
+            if (
+                not df_pre_apec.empty
+                and not df_post_apec.empty
+            ):
+                (
+                    df_compare_apec,
+                    df_summary_apec,
+                    json_data
+                )=compare_rest_bandpower_pre_post(
+                    df_pre_apec,
+                    df_post_apec,
+                    json_data,
+                    experiment_dir,
+                    sub,
+                    pre_label="REST_preICA_APcorr",
+                    post_label="REST_postICA_APcorr",
+                    save=save
+                )
+
+                results["band_comparison"]["apec_summary"]=(
+                    json_data.get(
+                        "PSD_compare_REST_preICA_APcorr_vs_REST_postICA_APcorr_summary"
+                    )
+                )
+
+    print("🔧 REST features: epoching on TEP SX/DX trigger times")
+
+    (
+        rest_epochs_sx,
+        rest_epochs_dx,
+        rest_evoked_sx,
+        rest_evoked_dx,
+        mapping,
+        json_data
+    )=create_rest_epochs_from_sx_dx_tep(
+        raw_rest=postICA_rest,
+        json_data=json_data,
+        experiment_dir=experiment_dir,
+        sub=sub,
+        tmin=tmin,
+        tmax=tmax,
+        baseline=baseline,
+        reject_by_annotation=bool(
+            json_data.get(
+                "rest_tep_reject_by_annotation",
+                True
+            )
+        ),
+        resample_to_tep=bool(
+            json_data.get(
+                "rest_tep_resample_to_tep",
+                False
+            )
+        ),
+        save=save,
+        note="REST_features_TEP_epoching"
+    )
+
+    results["tep_trigger_epoching"]={
+        "sx_epochs":int(len(rest_epochs_sx)),
+        "dx_epochs":int(len(rest_epochs_dx)),
+        "mapping_csv":json_data.get(
+            "rest_tep_event_mapping_csv"
+        ),
+        "tmin":tmin,
+        "tmax":tmax,
+        "baseline":baseline
+    }
+
+    pcist_outputs={}
+
+    if compute_null_pcist:
+        print("🔧 REST features: null/control PCIst SX and DX")
+
+        json_data.setdefault("pcist_k",1.2)
+        json_data.setdefault("pcist_min_snr",1.1)
+        json_data.setdefault("pcist_max_var",99)
+        json_data.setdefault("pcist_embed",False)
+        json_data.setdefault("pcist_n_steps",100)
+        json_data.setdefault("pcist_baseline_corr",False)
+
+        try:
+            pcist_module=importlib.import_module(
+                pcist_module_name
+            )
+
+            if not hasattr(pcist_module,"compute_pcist"):
+                raise AttributeError(
+                    f"{pcist_module_name} non espone compute_pcist()."
+                )
+
+            for side,epochs_side in [
+                ("SX",rest_epochs_sx),
+                ("DX",rest_epochs_dx)
+            ]:
+                pcist_sub=f"{sub}_REST_{side}_NULL"
+
+                (
+                    pci_value,
+                    pcist_result,
+                    json_data_side
+                )=pcist_module.compute_pcist(
+                    epochs_side,
+                    json_data.copy(),
+                    experiment_dir,
+                    pcist_sub
+                )
+
+                side_output={
+                    "value":float(pci_value),
+                    "n_dims":int(
+                        pcist_result["n_dims"]
+                    ),
+                    "dNST":np.asarray(
+                        pcist_result["dNST"],
+                        dtype=float
+                    ).tolist(),
+                    "output_directory":json_data_side.get(
+                        "PCIst_output_dir"
+                    ),
+                    "label":"REST null/control PCIst"
+                }
+
+                pcist_outputs[side]=side_output
+
+                json_data[
+                    f"REST_null_PCIst_{side}"
+                ]=float(pci_value)
+
+                json_data[
+                    f"REST_null_PCIst_{side}_n_dims"
+                ]=int(
+                    pcist_result["n_dims"]
+                )
+
+                json_data[
+                    f"REST_null_PCIst_{side}_output_dir"
+                ]=json_data_side.get(
+                    "PCIst_output_dir"
+                )
+
+            results["null_pcist"]=pcist_outputs
+            json_data["REST_null_PCIst_computed"]=True
+            json_data["REST_null_PCIst_interpretation"]=results[
+                "null_pcist_interpretation"
+            ]
+
+        except Exception as error:
+            results["null_pcist"]={
+                "status":"failed",
+                "error":repr(error)
+            }
+
+            json_data["REST_null_PCIst_computed"]=False
+            json_data["REST_null_PCIst_error"]=repr(error)
+
+            print(
+                f"⚠️ Null PCIst REST non calcolata: {error}"
+            )
+
+    if compute_random_pcist:
+        print(
+            f"🔧 REST features: {random_pcist_replicates} "
+            "repliche PCIst con trigger casuali"
+        )
+
+        try:
+            (
+                random_df,
+                random_summary,
+                random_distributions,
+                json_data
+            )=compute_rest_random_pcist_null(
+                raw_rest=postICA_rest,
+                reference_epochs={
+                    "SX":rest_epochs_sx,
+                    "DX":rest_epochs_dx
+                },
+                json_data=json_data,
+                experiment_dir=experiment_dir,
+                sub=sub,
+                pcist_module_name=pcist_module_name,
+                n_replicates=random_pcist_replicates,
+                random_seed=random_pcist_seed,
+                tmin=tmin,
+                tmax=tmax,
+                baseline=baseline,
+                pcist_baseline_window_ms=pcist_baseline_window_ms,
+                pcist_response_window_ms=pcist_response_window_ms,
+                save=save
+            )
+
+            json_data["REST_random_PCIst_dir"]=str(pcist_dir)
+
+            results["random_trigger_pcist"]={
+                "status":"ok",
+                "n_replicates":random_pcist_replicates,
+                "seed":random_pcist_seed,
+                "directory":str(pcist_dir),
+                "distributions":random_distributions
+            }
+
+        except Exception as error:
+            results["random_trigger_pcist"]={
+                "status":"failed",
+                "error":repr(error)
+            }
+
+            json_data["REST_random_PCIst_computed"]=False
+            json_data["REST_random_PCIst_error"]=repr(error)
+
+            print(
+                f"⚠️ Random-trigger PCIst REST non calcolata: {error}"
+            )
+
+    scalar_rows=[]
+
+    for side,side_result in pcist_outputs.items():
+        scalar_rows.append({
+            "subject":sub,
+            "side":side,
+            "feature":"REST_null_PCIst",
+            "value":side_result["value"],
+            "n_dims":side_result["n_dims"]
+        })
+
+    if scalar_rows:
+        pd.DataFrame(
+            scalar_rows
+        ).to_csv(
+            pcist_dir/f"{sub}_REST_null_PCIst_summary.csv",
+            index=False
+        )
+
+    with open(
+        feature_dir/f"{sub}_REST_features_summary.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            make_json_serializable(results),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    json_data["REST_feature_extraction_done"]=True
+    json_data["REST_feature_extraction_dir"]=str(
+        feature_dir
+    )
+
+    json_data["REST_feature_sections"]=[
+        key
+        for key in results
+        if key not in [
+            "subject",
+            "analysis_type",
+            "feature_directory",
+            "configuration",
+            "null_pcist_interpretation"
+        ]
+    ]
+
+    with open(
+        experiment_dir/f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            make_json_serializable(json_data),
+            file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print(
+        f"✅ REST feature extraction completata: "
+        f"{feature_dir}"
+    )
+
+    return results,json_data
+
+
 def saveLoadTestFinal(postICA_final,json_data,experiment_dir,sub,start_time):
 
     pkl_dir=Path(experiment_dir)/"7.pkls"
@@ -13194,3 +14423,179 @@ def create_rest_epochs_from_sx_dx_tep(
         mapping,
         json_data
     )
+
+def init_notes(json_data,experiment_dir,sub,pipeline="REST"):
+    from pathlib import Path
+    from datetime import datetime
+    import platform
+    import sys
+
+    notes_path=Path(experiment_dir)/"log.txt"
+    notes_path.parent.mkdir(parents=True,exist_ok=True)
+
+    parameter_descriptions={
+        "eeg_type":"Tipo di registrazione analizzata: resting-state oppure TMS-evoked EEG.",
+        "r_sfreq":"Frequenza di ricampionamento usata durante il preprocessing.",
+        "l_freq":"Frequenza minima del filtro passa-banda.",
+        "h_freq":"Frequenza massima finale del filtro passa-banda.",
+        "broad_band_h_freq":"Frequenza massima usata nel filtraggio preliminare broad-band.",
+        "powerline_freq":"Frequenza della rete elettrica rimossa con notch filter.",
+        "do_filter_and_plot_raw":"Attiva filtraggio del segnale continuo e salvataggio dei grafici PSD.",
+        "do_clean_trials_channels":"Attiva il controllo di canali e intervalli temporali artefattuali.",
+        "do_chan_trials_selection_automatic":"Se True usa il rilevamento automatico; se False apre la revisione manuale.",
+        "rest_auto_window_sec":"Durata delle finestre REST usate per rilevare segmenti anomali.",
+        "rest_auto_channel_z_threshold":"Soglia robusta per identificare canali anomali.",
+        "rest_auto_segment_z_threshold":"Soglia robusta per identificare finestre temporali anomale.",
+        "rest_auto_protect_seed_channels":"Impedisce l’esclusione automatica dei canali seed.",
+        "bad_channels":"Canali già noti come difettosi prima del rilevamento automatico.",
+        "bad_trials":"Lista compatibile con la pipeline TEP; nel REST gli intervalli bad sono annotazioni.",
+        "do_rest_detrend":"Attiva la rimozione del trend dal continuo REST.",
+        "rest_detrend_order":"Ordine del detrending: 0 media, 1 lineare, 2 quadratico.",
+        "rest_crop_edges":"Se True elimina realmente le porzioni iniziali e finali.",
+        "rest_preselect_edges_as_bad":"Marca le porzioni iniziali e finali come BAD senza eliminarle.",
+        "rest_crop_start_sec":"Durata iniziale da eliminare o marcare BAD.",
+        "rest_crop_end_sec":"Durata finale da eliminare o marcare BAD.",
+        "do_ica":"Attiva la decomposizione ICA.",
+        "do_ica_continuum":"Indica che l’ICA viene effettuata sul continuo REST.",
+        "do_ica_manualCheck":"Attiva la selezione manuale delle componenti ICA.",
+        "do_ica_automaticRej":"Attiva l’esclusione automatica tramite ICLabel.",
+        "do_label_prob_threshold":"Probabilità minima ICLabel richiesta per escludere una componente.",
+        "do_ica_eigThresh":"Percentile degli autovalori usato nelle pipeline che applicano tale criterio.",
+        "epochs_timewindow_min":"Inizio delle epoche rispetto all’evento, espresso in secondi.",
+        "epochs_timewindow_max":"Fine delle epoche rispetto all’evento, espressa in secondi.",
+        "baseline_cor_tmin":"Inizio della baseline correction delle epoche.",
+        "baseline_cor_tmax":"Fine della baseline correction delle epoche.",
+        "tep_sx_file":"File TEP da cui vengono letti i trigger della condizione SX.",
+        "tep_dx_file":"File TEP da cui vengono letti i trigger della condizione DX.",
+        "rest_features_fmin":"Frequenza minima delle feature spettrali REST.",
+        "rest_features_fmax":"Frequenza massima delle feature spettrali REST.",
+        "rest_features_relative":"Calcola la potenza relativa delle bande.",
+        "rest_features_remove_aperiodic":"Calcola anche le bande dopo rimozione della componente aperiodica.",
+        "pcist_baseline_window_ms":"Finestra REST pre-evento usata come baseline PCIst.",
+        "pcist_response_window_ms":"Finestra post-evento analizzata dalla PCIst.",
+        "rest_random_pcist_replicates":"Numero di distribuzioni null PCIst generate con trigger casuali.",
+        "rest_random_pcist_seed":"Seed casuale per rendere replicabile la distribuzione null PCIst.",
+        "use_synthetic_rest_signal":"Sostituisce il segnale reale con un REST sintetico.",
+        "mainDir":"Directory principale dei dati.",
+        "subject":"Identificativo del soggetto.",
+        "sourceData":"Origine o formato organizzativo del dataset.",
+        "dataType":"Formato del file EEG caricato."
+    }
+
+    with open(notes_path,"w",encoding="utf-8") as file:
+        file.write("="*80+"\n")
+        file.write("TMSPATH ANALYSIS NOTES\n")
+        file.write("="*80+"\n\n")
+        file.write(f"Subject: {sub}\n")
+        file.write(f"Pipeline: {pipeline}\n")
+        file.write(f"Analysis started: {datetime.now().isoformat(timespec='seconds')}\n")
+        file.write(f"Experiment directory: {Path(experiment_dir).resolve()}\n")
+        file.write(f"Python: {sys.version.split()[0]}\n")
+        file.write(f"Operating system: {platform.platform()}\n\n")
+
+        file.write("-"*80+"\n")
+        file.write("CONFIGURATION PARAMETERS\n")
+        file.write("-"*80+"\n\n")
+
+        for key,value in json_data.items():
+            description=parameter_descriptions.get(
+                key,
+                "Parametro della pipeline senza descrizione specifica."
+            )
+            file.write(f"{key}\n")
+            file.write(f"  Value: {value}\n")
+            file.write(f"  Meaning: {description}\n\n")
+
+        file.write("-"*80+"\n")
+        file.write("PROCEDURAL LOG\n")
+        file.write("-"*80+"\n\n")
+
+    json_data["notes_path"]=str(notes_path)
+    return notes_path,json_data
+
+
+def log_note(experiment_dir,message,level="INFO",details=None):
+    from pathlib import Path
+    from datetime import datetime
+
+    notes_path=Path(experiment_dir)/"log.txt"
+    timestamp=datetime.now().isoformat(timespec="seconds")
+
+    with open(notes_path,"a",encoding="utf-8") as file:
+        file.write(f"[{timestamp}] [{level}] {message}\n")
+
+        if details is not None:
+            if isinstance(details,dict):
+                for key,value in details.items():
+                    file.write(f"    {key}: {value}\n")
+            else:
+                file.write(f"    {details}\n")
+
+        file.write("\n")
+
+def start_log_step(experiment_dir,step_name,details=None):
+    import time
+
+    log_note(
+        experiment_dir,
+        step_name,
+        level="START",
+        details=details
+    )
+
+    return time.time()
+
+def end_log_step(experiment_dir,step_name,start_time,details=None):
+    import time
+
+    elapsed=time.time()-start_time
+
+    final_details={} if details is None else dict(details)
+    final_details["elapsed_sec"]=round(elapsed,3)
+
+    log_note(
+        experiment_dir,
+        step_name,
+        level="DONE",
+        details=final_details
+    )
+
+    return elapsed
+
+def finalize_notes(json_data,experiment_dir,sub,status="completed"):
+    from pathlib import Path
+    from datetime import datetime
+    import time
+
+    elapsed=None
+
+    if json_data.get("start_time") is not None:
+        elapsed=time.time()-float(json_data["start_time"])
+
+    details={
+        "subject":sub,
+        "status":status,
+        "finished":datetime.now().isoformat(timespec="seconds"),
+        "elapsed_sec":round(elapsed,2) if elapsed is not None else "unknown",
+        "bad_channels":json_data.get("bad_channels",[]),
+        "ICA_excludedComponents":json_data.get("ICA_excludedComponents",[]),
+        "REST_null_PCIst_SX":json_data.get("REST_null_PCIst_SX"),
+        "REST_null_PCIst_DX":json_data.get("REST_null_PCIst_DX"),
+        "feature_directory":json_data.get("REST_feature_extraction_dir")
+    }
+
+    log_note(
+        experiment_dir,
+        "Analysis finished",
+        level="SUMMARY",
+        details=details
+    )
+
+    notes_path=Path(experiment_dir)/"log.txt"
+
+    with open(notes_path,"a",encoding="utf-8") as file:
+        file.write("="*80+"\n")
+        file.write("END OF ANALYSIS\n")
+        file.write("="*80+"\n")
+
+    return notes_path
