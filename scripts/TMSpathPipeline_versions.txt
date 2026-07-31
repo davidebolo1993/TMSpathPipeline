@@ -1,3 +1,3 @@
-2026-07-21|TMSpathPipeline|1.00
-2026-07-21|TMSpathPipeline|1.01
-2026-07-31|TMSpathPipeline|1.02
+2026-07-21|TMSpathPipeline|1.0.0
+2026-07-21|TMSpathPipeline|1.0.1
+2026-07-31|TMSpathPipeline|1.0.2
