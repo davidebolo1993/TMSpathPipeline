@@ -170,6 +170,413 @@ def import_modules():
     return date, start_time
 
 
+def replace_raw_with_synthetic_tep_ground_truth(
+    raw,
+    events,
+    json_data,
+    frequency_hz=None,
+    onset_sec=None,
+    tau_sec=None,
+    amplitude_uv=None,
+    noise_uv=None,
+    frequency_jitter_hz=None,
+    amplitude_jitter=None,
+    phase_jitter_rad=None,
+    add_aperiodic_noise=None,
+    add_tms_artifact=None,
+    tms_artifact_uv=None,
+    seed=None
+):
+    import numpy as np
+    import mne
+
+    raw_out=raw.copy().load_data()
+
+    if events is None or len(events)==0:
+        raise ValueError(
+            "Per creare il ground truth TEP servono eventi TMS validi."
+        )
+
+    frequency_hz=float(
+        json_data.get(
+            "synthetic_tep_frequency_hz",
+            20.0 if frequency_hz is None else frequency_hz
+        )
+    )
+    onset_sec=float(
+        json_data.get(
+            "synthetic_tep_onset_sec",
+            0.020 if onset_sec is None else onset_sec
+        )
+    )
+    tau_sec=float(
+        json_data.get(
+            "synthetic_tep_tau_sec",
+            0.180 if tau_sec is None else tau_sec
+        )
+    )
+    amplitude_uv=float(
+        json_data.get(
+            "synthetic_tep_amplitude_uv",
+            12.0 if amplitude_uv is None else amplitude_uv
+        )
+    )
+    noise_uv=float(
+        json_data.get(
+            "synthetic_tep_noise_uv",
+            4.0 if noise_uv is None else noise_uv
+        )
+    )
+    frequency_jitter_hz=float(
+        json_data.get(
+            "synthetic_tep_frequency_jitter_hz",
+            0.0 if frequency_jitter_hz is None else frequency_jitter_hz
+        )
+    )
+    amplitude_jitter=float(
+        json_data.get(
+            "synthetic_tep_amplitude_jitter",
+            0.15 if amplitude_jitter is None else amplitude_jitter
+        )
+    )
+    phase_jitter_rad=float(
+        json_data.get(
+            "synthetic_tep_phase_jitter_rad",
+            0.0 if phase_jitter_rad is None else phase_jitter_rad
+        )
+    )
+    add_aperiodic_noise=bool(
+        json_data.get(
+            "synthetic_tep_add_aperiodic_noise",
+            True if add_aperiodic_noise is None else add_aperiodic_noise
+        )
+    )
+    add_tms_artifact=bool(
+        json_data.get(
+            "synthetic_tep_add_tms_artifact",
+            False if add_tms_artifact is None else add_tms_artifact
+        )
+    )
+    tms_artifact_uv=float(
+        json_data.get(
+            "synthetic_tep_tms_artifact_uv",
+            1000.0 if tms_artifact_uv is None else tms_artifact_uv
+        )
+    )
+    seed=int(
+        json_data.get(
+            "synthetic_tep_seed",
+            42 if seed is None else seed
+        )
+    )
+
+    if frequency_hz<=0:
+        raise ValueError("synthetic_tep_frequency_hz deve essere > 0.")
+    if onset_sec<0:
+        raise ValueError("synthetic_tep_onset_sec deve essere >= 0.")
+    if tau_sec<=0:
+        raise ValueError("synthetic_tep_tau_sec deve essere > 0.")
+
+    rng=np.random.default_rng(seed)
+    sfreq=float(raw_out.info["sfreq"])
+    n_times=int(raw_out.n_times)
+    first_samp=int(raw_out.first_samp)
+
+    eeg_picks=mne.pick_types(
+        raw_out.info,
+        eeg=True,
+        exclude=[]
+    )
+
+    if len(eeg_picks)==0:
+        raise ValueError("Nessun canale EEG disponibile nel Raw.")
+
+    eeg_names=[
+        raw_out.ch_names[index]
+        for index in eeg_picks
+    ]
+
+    seed_channels=[
+        channel
+        for channel in json_data.get(
+            "seedChans",
+            []
+        )
+        if channel in eeg_names
+    ]
+
+    if not seed_channels:
+        seed_channels=eeg_names[:min(4,len(eeg_names))]
+
+    positions={}
+    for channel in raw_out.info["chs"]:
+        name=channel["ch_name"]
+        loc=np.asarray(channel["loc"][:3],dtype=float)
+        if np.all(np.isfinite(loc)) and np.linalg.norm(loc)>0:
+            positions[name]=loc
+
+    seed_positions=[
+        positions[channel]
+        for channel in seed_channels
+        if channel in positions
+    ]
+
+    if seed_positions:
+        seed_center=np.mean(seed_positions,axis=0)
+        distances={}
+        for channel in eeg_names:
+            if channel in positions:
+                distances[channel]=float(
+                    np.linalg.norm(
+                        positions[channel]-seed_center
+                    )
+                )
+            else:
+                distances[channel]=np.nan
+
+        finite_distances=np.asarray(
+            [value for value in distances.values() if np.isfinite(value)],
+            dtype=float
+        )
+
+        spatial_scale=float(
+            np.nanmedian(finite_distances)
+        ) if finite_distances.size else 0.08
+
+        spatial_scale=max(spatial_scale,0.03)
+
+        spatial_weights={
+            channel:(
+                float(np.exp(-(distances[channel]/spatial_scale)**2))
+                if np.isfinite(distances[channel])
+                else 0.10
+            )
+            for channel in eeg_names
+        }
+    else:
+        spatial_weights={
+            channel:(1.0 if channel in seed_channels else 0.10)
+            for channel in eeg_names
+        }
+
+    for channel in seed_channels:
+        spatial_weights[channel]=max(
+            spatial_weights.get(channel,0.0),
+            0.85
+        )
+
+    def make_aperiodic_noise():
+        white=rng.normal(size=n_times)
+        spectrum=np.fft.rfft(white)
+        frequencies=np.fft.rfftfreq(
+            n_times,
+            d=1.0/sfreq
+        )
+
+        scaling=np.zeros_like(
+            frequencies,
+            dtype=float
+        )
+
+        valid=frequencies>=0.5
+        scaling[valid]=1.0/np.sqrt(
+            frequencies[valid]
+        )
+
+        spectrum*=scaling
+        noise=np.fft.irfft(
+            spectrum,
+            n=n_times
+        )
+
+        noise-=np.mean(noise)
+        standard_deviation=np.std(noise)
+
+        if standard_deviation>0:
+            noise/=standard_deviation
+
+        return noise
+
+    synthetic_data=np.zeros(
+        (len(eeg_picks),n_times),
+        dtype=float
+    )
+
+    for channel_index in range(len(eeg_picks)):
+        if add_aperiodic_noise:
+            background=make_aperiodic_noise()
+        else:
+            background=rng.normal(size=n_times)
+
+        synthetic_data[channel_index]=background*noise_uv*1e-6
+
+    response_duration_sec=float(
+        json_data.get(
+            "synthetic_tep_response_duration_sec",
+            max(0.8,5.0*tau_sec)
+        )
+    )
+
+    response_samples=max(
+        1,
+        int(np.ceil(response_duration_sec*sfreq))
+    )
+
+    event_samples=np.asarray(events[:,0],dtype=int)-first_samp
+
+    event_frequencies=[]
+    event_amplitudes=[]
+    event_phases=[]
+
+    for event_sample in event_samples:
+        event_frequency=frequency_hz+rng.normal(
+            0.0,
+            frequency_jitter_hz
+        )
+        event_frequency=max(0.1,float(event_frequency))
+
+        event_amplitude=amplitude_uv*(
+            1.0+rng.normal(0.0,amplitude_jitter)
+        )
+        event_amplitude=max(0.0,float(event_amplitude))
+
+        event_phase=rng.normal(
+            0.0,
+            phase_jitter_rad
+        )
+
+        start_sample=int(
+            event_sample+round(onset_sec*sfreq)
+        )
+        stop_sample=min(
+            n_times,
+            start_sample+response_samples
+        )
+
+        if start_sample<0 or start_sample>=n_times or stop_sample<=start_sample:
+            continue
+
+        relative_time=np.arange(
+            stop_sample-start_sample,
+            dtype=float
+        )/sfreq
+
+        oscillation=(
+            event_amplitude
+            *1e-6
+            *np.exp(-relative_time/tau_sec)
+            *np.sin(
+                2.0*np.pi*event_frequency*relative_time
+                +event_phase
+            )
+        )
+
+        for channel_index,channel_name in enumerate(eeg_names):
+            channel_variability=max(
+                0.0,
+                1.0+rng.normal(0.0,0.05)
+            )
+
+            synthetic_data[
+                channel_index,
+                start_sample:stop_sample
+            ]+=(
+                spatial_weights[channel_name]
+                *channel_variability
+                *oscillation
+            )
+
+        if add_tms_artifact:
+            artifact_start=max(
+                0,
+                int(event_sample+round(-0.002*sfreq))
+            )
+            artifact_stop=min(
+                n_times,
+                int(event_sample+round(0.008*sfreq))+1
+            )
+
+            if artifact_stop>artifact_start:
+                artifact_length=artifact_stop-artifact_start
+                artifact_envelope=np.hanning(
+                    max(3,artifact_length)
+                )[:artifact_length]
+
+                signs=rng.choice(
+                    [-1.0,1.0],
+                    size=(len(eeg_picks),1)
+                )
+
+                synthetic_data[
+                    :,
+                    artifact_start:artifact_stop
+                ]+=(
+                    signs
+                    *tms_artifact_uv
+                    *1e-6
+                    *artifact_envelope[np.newaxis,:]
+                )
+
+        event_frequencies.append(float(event_frequency))
+        event_amplitudes.append(float(event_amplitude))
+        event_phases.append(float(event_phase))
+
+    raw_out._data[eeg_picks,:]=synthetic_data
+
+    json_data["data_replaced_with_synthetic_tep"]=True
+    json_data["synthetic_tep_ground_truth_hz"]=float(frequency_hz)
+    json_data["synthetic_tep_frequency_hz"]=float(frequency_hz)
+    json_data["synthetic_tep_onset_sec"]=float(onset_sec)
+    json_data["synthetic_tep_tau_sec"]=float(tau_sec)
+    json_data["synthetic_tep_amplitude_uv"]=float(amplitude_uv)
+    json_data["synthetic_tep_noise_uv"]=float(noise_uv)
+    json_data["synthetic_tep_frequency_jitter_hz"]=float(
+        frequency_jitter_hz
+    )
+    json_data["synthetic_tep_amplitude_jitter"]=float(
+        amplitude_jitter
+    )
+    json_data["synthetic_tep_phase_jitter_rad"]=float(
+        phase_jitter_rad
+    )
+    json_data["synthetic_tep_add_aperiodic_noise"]=bool(
+        add_aperiodic_noise
+    )
+    json_data["synthetic_tep_add_tms_artifact"]=bool(
+        add_tms_artifact
+    )
+    json_data["synthetic_tep_tms_artifact_uv"]=float(
+        tms_artifact_uv
+    )
+    json_data["synthetic_tep_seed"]=int(seed)
+    json_data["synthetic_tep_seed_channels"]=list(
+        seed_channels
+    )
+    json_data["synthetic_tep_spatial_weights"]={
+        channel:float(weight)
+        for channel,weight in spatial_weights.items()
+    }
+    json_data["synthetic_tep_event_frequencies_hz"]=event_frequencies
+    json_data["synthetic_tep_event_amplitudes_uv"]=event_amplitudes
+    json_data["synthetic_tep_event_phases_rad"]=event_phases
+    json_data["synthetic_tep_n_events_injected"]=int(
+        len(event_frequencies)
+    )
+    json_data["synthetic_tep_original_patient_metadata_preserved"]=True
+    json_data["synthetic_tep_replaced_channel_type"]="EEG only"
+
+    print("🧪 TEP synthetic ground-truth mode")
+    print("   Patient metadata, montage, duration and events preserved")
+    print("   EEG time series replaced with synthetic event-locked responses")
+    print(f"   Ground-truth Natural Frequency: {frequency_hz:.3f} Hz")
+    print(f"   Seed channels: {seed_channels}")
+    print(f"   Events injected: {len(event_frequencies)}")
+    print(f"   Noise: {noise_uv:.3f} µV")
+    print(f"   TMS artifact added: {add_tms_artifact}")
+
+    return raw_out,json_data
+
+
 def setup_tep_analysis(json_data):
     from pathlib import Path
 
@@ -248,17 +655,64 @@ def setup_tep_analysis(json_data):
     )
 
 
-def make_json_serializable(d):
-    new_d = {}
-    for k, v in d.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            new_d[k] = v
-        elif isinstance(v, (list, tuple)):
-            new_d[k] = [make_json_serializable({'v': x})['v'] if isinstance(x, dict) else str(x) for x in v]
-        else:
-            # Converti tutto il resto in stringa
-            new_d[k] = str(v)
-    return new_d
+def make_json_serializable(value):
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    from datetime import datetime,date
+
+    if isinstance(value,dict):
+        return {
+            str(key):make_json_serializable(item)
+            for key,item in value.items()
+        }
+
+    if isinstance(value,(list,tuple,set)):
+        return [
+            make_json_serializable(item)
+            for item in value
+        ]
+
+    if isinstance(value,np.ndarray):
+        return make_json_serializable(
+            value.tolist()
+        )
+
+    if isinstance(value,np.generic):
+        return value.item()
+
+    if isinstance(value,pd.DataFrame):
+        return make_json_serializable(
+            value.to_dict(
+                orient="records"
+            )
+        )
+
+    if isinstance(value,pd.Series):
+        return make_json_serializable(
+            value.to_list()
+        )
+
+    if isinstance(value,Path):
+        return str(value)
+
+    if isinstance(value,(datetime,date)):
+        return value.isoformat()
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        (str,int,float,bool)
+    ):
+        if isinstance(value,float):
+            if np.isnan(value) or np.isinf(value):
+                return None
+
+        return value
+
+    return str(value)
 
 def directorySetup(json_data):
     import os
@@ -266,12 +720,13 @@ def directorySetup(json_data):
     from pathlib import Path
     from datetime import datetime
 
-    sub=str(json_data["subject"]).strip().upper()
+    sub=str(
+        json_data["subject"]
+    ).strip().upper()
+
     pipeline_info=load_pipeline_version()
-    json_data.update(
-        pipeline_info
-    )
-    
+    json_data.update(pipeline_info)
+
     hemisphere=str(
         json_data.get(
             "emispheric_stimulation",
@@ -285,7 +740,11 @@ def directorySetup(json_data):
         )
     ).strip().upper()
 
-    hemisphere=hemisphere.replace(" ","").replace("_","")
+    hemisphere=(
+        hemisphere
+        .replace(" ","")
+        .replace("_","")
+    )
 
     aliases={
         "DX":"DX",
@@ -305,11 +764,15 @@ def directorySetup(json_data):
 
     if hemisphere not in ["DX","SX"]:
         raise ValueError(
-            "Impostare json_data['emispheric_stimulation'] "
+            "Impostare "
+            "json_data['emispheric_stimulation'] "
             "a 'DX' oppure 'SX'."
         )
 
-    timestamp=datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp=datetime.now().strftime(
+        "%Y%m%d%H%M%S"
+    )
+
     recording_name=f"{sub}{hemisphere}"
 
     json_data["subject"]=sub
@@ -319,15 +782,13 @@ def directorySetup(json_data):
     json_data["pipeline_timestamp"]=timestamp
 
     if json_data.get("experiment_dir"):
-        experiment_dir=str(
-            Path(
-                json_data["experiment_dir"]
-            ).expanduser().resolve()
-        )
+        experiment_path=Path(
+            json_data["experiment_dir"]
+        ).expanduser().resolve()
 
         print(
-            f"📌 Using provided experiment_dir: "
-            f"{experiment_dir}"
+            "📌 Using provided experiment_dir:",
+            experiment_path
         )
 
     else:
@@ -335,62 +796,174 @@ def directorySetup(json_data):
             json_data["mainDir"]
         ).expanduser().resolve()
 
-        subject_dir=main_dir/sub
-
-        experiment_dir=str(
-            subject_dir/f"{timestamp}_{recording_name}"
+        experiment_path=(
+            main_dir
+            /sub
+            /f"{timestamp}_{recording_name}"
         )
 
         print(
-            f"📁 Generated TEP experiment_dir: "
-            f"{experiment_dir}"
+            "📁 Generated TEP experiment_dir:",
+            experiment_path
         )
 
     subdirs=[
         "1.basic",
-        "2.detrend",
-        os.path.join("2.detrend","examples"),
-        os.path.join("3.trials","preDetrend"),
-        os.path.join("3.trials","postDetrend"),
+
+        "2.trials",
+        os.path.join(
+            "2.trials",
+            "preDetrend"
+        ),
+        os.path.join(
+            "2.trials",
+            "postDetrend"
+        ),
+
+        "3.detrend",
+        os.path.join(
+            "3.detrend",
+            "examples"
+        ),
+
         "4.postICA",
+
         "5.Extra",
-        os.path.join("5.Extra","FE"),
-        os.path.join("5.Extra","FE","PCIst"),
-        os.path.join("5.Extra","FE","Fingerprint"),
-        "6.pkls",
-        "7.FOOOF"
+        os.path.join(
+            "5.Extra",
+            "FE"
+        ),
+        os.path.join(
+            "5.Extra",
+            "FE",
+            "PCIst"
+        ),
+        os.path.join(
+            "5.Extra",
+            "FE",
+            "Fingerprint"
+        ),
+        os.path.join(
+            "5.Extra",
+            "FE",
+            "NaturalFrequency"
+        ),
+
+        "6.FOOOF",
+        "7.pkls"
     ]
 
-    Path(experiment_dir).mkdir(
+    experiment_path.mkdir(
         parents=True,
         exist_ok=True
     )
 
     for subdir in subdirs:
-        Path(
-            experiment_dir,
-            subdir
+        (
+            experiment_path
+            /subdir
         ).mkdir(
             parents=True,
             exist_ok=True
         )
 
-    json_data["experiment_dir"]=experiment_dir
-    json_data["tep_directory_structure"]=subdirs
+    json_data["experiment_dir"]=str(
+        experiment_path
+    )
+
+    json_data["tep_directory_structure"]=list(
+        subdirs
+    )
+
+    json_data["basic_dir"]=str(
+        experiment_path
+        /"1.basic"
+    )
+
+    json_data["trials_dir"]=str(
+        experiment_path
+        /"2.trials"
+    )
+
+    json_data["trials_pre_detrend_dir"]=str(
+        experiment_path
+        /"2.trials"
+        /"preDetrend"
+    )
+
+    json_data["trials_post_detrend_dir"]=str(
+        experiment_path
+        /"2.trials"
+        /"postDetrend"
+    )
+
+    json_data["detrend_dir"]=str(
+        experiment_path
+        /"3.detrend"
+    )
+
+    json_data["detrend_examples_dir"]=str(
+        experiment_path
+        /"3.detrend"
+        /"examples"
+    )
+
+    json_data["postICA_dir_base"]=str(
+        experiment_path
+        /"4.postICA"
+    )
+
+    json_data["features_dir"]=str(
+        experiment_path
+        /"5.Extra"
+        /"FE"
+    )
+
+    json_data["fooof_dir"]=str(
+        experiment_path
+        /"6.FOOOF"
+    )
+
+    json_data["pkls_dir"]=str(
+        experiment_path
+        /"7.pkls"
+    )
+
+    pars_path=(
+        experiment_path
+        /f"{sub}_pars.json"
+    )
 
     with open(
-        Path(experiment_dir)/f"{sub}_pars.json",
+        pars_path,
         "w",
         encoding="utf-8"
     ) as json_file:
         json.dump(
-            make_json_serializable(json_data),
+            make_json_serializable(
+                json_data
+            ),
             json_file,
             indent=4,
-            sort_keys=True
+            sort_keys=True,
+            ensure_ascii=False
         )
 
-    return json_data,experiment_dir,sub
+    print(
+        "✅ TEP directory structure created"
+    )
+
+    for subdir in subdirs:
+        print(
+            "   ",
+            subdir
+        )
+
+    return (
+        json_data,
+        str(experiment_path),
+        sub
+    )
 
 
 def load_pipeline_version(version_file=None):
@@ -441,40 +1014,7 @@ def load_pipeline_version(version_file=None):
     }
 
 
-def directorySetup_old_20260416(json_data):
-    # === 5. Directory Setup ===
-    extraNote = f'{json_data['detrend_typeOffsetRise']}_{json_data['detrend_typeOffsetDecay']}'
-    sub = json_data['subject']
-    #experiment_dir = os.path.join(json_data['mainDir'], f"{json_data['date']}_{json_data['emispheric_stimulation']}_{extraNote}")
-    #experiment_dir = os.path.join(json_data['mainDir'], f"{json_data['detrend_fitConstraint']}_{json_data['detrend_offsetCorrectionType']}_{json_data['emispheric_stimulation']}_{extraNote}")
-    fit_letter = str(json_data['detrend_fitConstraint'])[0]  # 'T' o 'F'
-    offset_letter = str(json_data['detrend_offsetCorrectionType'])[0]  # Prima lettera della stringa
-    date = json_data['date']
-    experiment_dir = os.path.join(
-        json_data['mainDir'],
-        f"{date}_{fit_letter}_{offset_letter}_{extraNote}"
-    )
 
-    subdirs = [
-        '1.basic',
-        os.path.join('2.detrend'),
-        os.path.join('2.detrend', 'examples'),
-        os.path.join('3.trials', 'preDetrend'),
-        os.path.join('3.trials', 'postDetrend'),
-        '4.postICA',
-        os.path.join('5.final'),
-        os.path.join('5.final', 'FE'),
-        '6.pkls',
-        '7.FOOOF'
-    ]
-    os.makedirs(experiment_dir, exist_ok=True)
-    for subdir in subdirs:
-        os.makedirs(os.path.join(experiment_dir, subdir), exist_ok=True)
- 
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data, json_file, indent=4, sort_keys=True)
-
-    return json_data, experiment_dir, sub
 
 
 def loadEDF(json_data, fileName):
@@ -599,7 +1139,7 @@ def add_exp_artifact(epochs, json_data, experiment_dir, sub, tau_rise=0.005, tau
     epochs_artifacted._data = data  # attenzione: modifica diretta
 
     # Save filtered raw and ICA model
-    pkl_raw_path = Path(experiment_dir) / "6.pkls" / f"{sub}_epochs_artifacted.pkl"
+    pkl_raw_path = Path(experiment_dir) / "7.pkls" / f"{sub}_epochs_artifacted.pkl"
     with open(pkl_raw_path, 'wb') as f:
         pickle.dump(epochs_artifacted, f)
             
@@ -670,7 +1210,7 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
                                   chans=json_data['do_artifact_chans'])
         basicPlots(epochs, 
                    json_data, experiment_dir, 
-                   sub, key='epochs_artifacted', subPath='2.Detrend', show=False)
+                   sub, key='epochs_artifacted', subPath='3.detrend', show=False)
 
 
     detrendedEpochs, json_data = computeDetrendSteps(epochs, 
@@ -679,9 +1219,67 @@ def computeBasicSteps(raw, events, json_data, experiment_dir, sub,
 
     return raw, epochs, detrendedEpochs, temp_epochs, json_data
 
+
+def add_intertrial_statistics(events, sfreq, json_data):
+    import numpy as np
+
+    event_samples=np.asarray(events[:,0],dtype=int)
+    intertrial_times_s=np.diff(event_samples)/float(sfreq)
+
+    json_data["intertrial_n_trials"]=int(len(event_samples))
+    json_data["intertrial_n_intervals"]=int(len(intertrial_times_s))
+
+    if intertrial_times_s.size:
+        json_data["intertrial_mean_s"]=float(np.mean(intertrial_times_s))
+        json_data["intertrial_min_s"]=float(np.min(intertrial_times_s))
+        json_data["intertrial_max_s"]=float(np.max(intertrial_times_s))
+        json_data["intertrial_median_s"]=float(np.median(intertrial_times_s))
+        json_data["intertrial_std_s"]=float(
+            np.std(intertrial_times_s,ddof=1)
+        ) if intertrial_times_s.size>1 else 0.0
+        json_data["intertrial_times_s"]=intertrial_times_s.tolist()
+    else:
+        json_data["intertrial_mean_s"]=None
+        json_data["intertrial_min_s"]=None
+        json_data["intertrial_max_s"]=None
+        json_data["intertrial_median_s"]=None
+        json_data["intertrial_std_s"]=None
+        json_data["intertrial_times_s"]=[]
+
+    print("\n⏱️ Inter-trial statistics")
+    print(f"   Numero trial: {json_data['intertrial_n_trials']}")
+    print(f"   Numero intervalli: {json_data['intertrial_n_intervals']}")
+
+    if intertrial_times_s.size:
+        print(
+            f"   Inter-trial medio: "
+            f"{json_data['intertrial_mean_s']:.3f} s"
+        )
+        print(
+            f"   Inter-trial minimo: "
+            f"{json_data['intertrial_min_s']:.3f} s"
+        )
+        print(
+            f"   Inter-trial massimo: "
+            f"{json_data['intertrial_max_s']:.3f} s"
+        )
+        print(
+            f"   Inter-trial mediano: "
+            f"{json_data['intertrial_median_s']:.3f} s"
+        )
+        print(
+            f"   Inter-trial SD: "
+            f"{json_data['intertrial_std_s']:.3f} s"
+        )
+    else:
+        print("   Nessun intervallo disponibile.")
+
+    return json_data
+
 def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
     import os
     import pickle
+    import json
     import numpy as np
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -699,6 +1297,41 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
     json_data['pulse_artifact_rej_smoothingvalue'] = 0.002
     saveNote = ''
     raw, events = None, None
+
+
+    def add_intertrial_statistics(events, sfreq):
+        event_samples=np.asarray(events[:,0],dtype=int)
+        intertrial_times_s=np.diff(event_samples)/float(sfreq)
+
+        json_data["intertrial_n_trials"]=int(len(event_samples))
+        json_data["intertrial_n_intervals"]=int(len(intertrial_times_s))
+        json_data["intertrial_mean_s"]=float(np.mean(intertrial_times_s)) if intertrial_times_s.size else None
+        json_data["intertrial_min_s"]=float(np.min(intertrial_times_s)) if intertrial_times_s.size else None
+        json_data["intertrial_max_s"]=float(np.max(intertrial_times_s)) if intertrial_times_s.size else None
+        json_data["intertrial_times_s"]=intertrial_times_s.tolist()
+
+        print("\n⏱️ Inter-trial statistics")
+        print(f"   Numero trial: {json_data['intertrial_n_trials']}")
+        print(f"   Numero intervalli: {json_data['intertrial_n_intervals']}")
+
+        if intertrial_times_s.size:
+            print(f"   Inter-trial medio: {json_data['intertrial_mean_s']:.3f} s")
+            print(f"   Inter-trial minimo: {json_data['intertrial_min_s']:.3f} s")
+            print(f"   Inter-trial massimo: {json_data['intertrial_max_s']:.3f} s")
+        else:
+            print("   Inter-trial non disponibile: meno di 2 eventi.")
+
+        with open(
+            Path(experiment_dir)/f"{sub}_pars.json",
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                make_json_serializable(json_data),
+                file,
+                indent=4,
+                sort_keys=True
+            )
 
     def save_layout_and_metadata(raw, note):
         # Salva layout
@@ -720,12 +1353,13 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         fileName = f"{json_data['mainDir']}\\{json_data['subject']}.fif"
         epochs = mne.read_epochs(fileName, preload=True)
         basicPlots(epochs, json_data, experiment_dir, sub, key='epochsOK', subPath='1.basic')
-        with open(Path(experiment_dir) / '6.pkls' / f'{sub}_epochsOK.pkl', 'wb') as f:
+        with open(Path(experiment_dir) / '7.pkls' / f'{sub}_epochsOK.pkl', 'wb') as f:
             pickle.dump(epochs, f)
         json_data['sfreq'] = epochs.info['sfreq']
         json_data['r_sfreq'] = 512
         raw = epochs
         events = raw.events
+        add_intertrial_statistics(events, epochs.info['sfreq'])
         json_data['TEP_ID_events'] = 'no_events'
         save_layout_and_metadata(raw, 'no_events')
         return raw, events, json_data
@@ -751,6 +1385,16 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
             events, event_id = mne.events_from_annotations(raw, verbose=False)
             TMScode = np.unique(events[:, 2])[0]
             events = events[events[:, 2] == TMScode]
+
+            if bool(json_data.get("use_synthetic_tep_ground_truth",False)):
+                raw,json_data=replace_raw_with_synthetic_tep_ground_truth(
+                    raw=raw,
+                    events=events,
+                    json_data=json_data
+                )
+            else:
+                json_data["data_replaced_with_synthetic_tep"]=False
+
             saveNote = 'EDF_events'
             json_data['TEP_ID_events'] = saveNote
             json_data['sfreq'] = raw.info['sfreq']
@@ -822,8 +1466,51 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
             raw._data = data[:len(raw.ch_names)]
             json_data['ch_names'] = raw.ch_names
             events, event_id = mne.events_from_annotations(raw, verbose=False)
+
+            if len(events)==0:
+                raise ValueError(
+                    "Nessun evento trovato nelle annotazioni EDF."
+                )
+
             TMScode = np.unique(events[:, 2])[0]
             events = events[events[:, 2] == TMScode]
+
+            if len(events)==0:
+                raise ValueError(
+                    f"Nessun evento trovato per TMScode={TMScode}."
+                )
+
+            add_intertrial_statistics(events, raw.info['sfreq'])
+
+            if bool(
+                json_data.get(
+                    "use_synthetic_tep_ground_truth",
+                    False
+                )
+            ):
+                print(
+                    "🧪 Replacing patient EEG time series "
+                    "with synthetic TEP ground truth"
+                )
+
+                raw,json_data=replace_raw_with_synthetic_tep_ground_truth(
+                    raw=raw,
+                    events=events,
+                    json_data=json_data
+                )
+
+                if not json_data.get(
+                    "data_replaced_with_synthetic_tep",
+                    False
+                ):
+                    raise RuntimeError(
+                        "La sostituzione sintetica TEP non è stata applicata."
+                    )
+            else:
+                json_data[
+                    "data_replaced_with_synthetic_tep"
+                ]=False
+
             saveNote = 'EDF_events'
             json_data['TEP_ID_events'] = saveNote
             json_data['sfreq'] = raw.info['sfreq']
@@ -848,6 +1535,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
             events, event_id = mne.events_from_annotations(raw, verbose=False)
             TMScode = 1015
             events = events[events[:, 2] == TMScode]
+            add_intertrial_statistics(events, raw.info['sfreq'])
             saveNote = 'NGH_events'
             json_data['TEP_ID_events'] = saveNote
             json_data['sfreq'] = raw.info['sfreq']
@@ -870,6 +1558,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
                 shift_sec = - ((0.0001 * 4) + 0.002)
                 shift_samples = int(shift_sec * raw.info['sfreq'])
                 events[:, 0] += shift_samples
+            add_intertrial_statistics(events, raw.info['sfreq'])
             json_data['TEP_ID_events'] = saveNote
             json_data['sfreq'] = raw.info['sfreq']
             save_layout_and_metadata(raw, saveNote)
@@ -888,6 +1577,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
             events, event_id = mne.events_from_annotations(raw, verbose=False)
             TMScode = np.unique(events[:, 2])[0]
             events = events[events[:, 2] == TMScode]
+            add_intertrial_statistics(events, raw.info['sfreq'])
             saveNote = 'EDF_events'
             json_data['TEP_ID_events'] = saveNote
             json_data['sfreq'] = raw.info['sfreq']
@@ -919,11 +1609,11 @@ def run_ica_continuum_pipeline(raw, events, json_data, experiment_dir, sub):
         )
 
         # Save filtered raw and ICA model
-        pkl_raw_path = Path(experiment_dir) / "6.pkls" / f"{sub}_raw_ICA_continuum.pkl"
+        pkl_raw_path = Path(experiment_dir) / "7.pkls" / f"{sub}_raw_ICA_continuum.pkl"
         with open(pkl_raw_path, 'wb') as f:
             pickle.dump(raw_ica, f)
 
-        pkl_ica_path = Path(experiment_dir) / "6.pkls" / f"{sub}_ica_model_continuum.pkl"
+        pkl_ica_path = Path(experiment_dir) / "7.pkls" / f"{sub}_ica_model_continuum.pkl"
         with open(pkl_ica_path, 'wb') as f:
             pickle.dump(ica_model, f)
 
@@ -1055,7 +1745,7 @@ def filter_and_plot_raw(raw, json_data, experiment_dir, sub, figsize=(10, 6), su
     plt.close(fig)
 
     # === Save raw object
-    raw_pkl_path = Path(experiment_dir) / '6.pkls' / f'{sub}_raw.pkl'
+    raw_pkl_path = Path(experiment_dir) / '7.pkls' / f'{sub}_raw.pkl'
     with open(raw_pkl_path, 'wb') as f:
         pickle.dump(raw, f)
 
@@ -1934,17 +2624,17 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
             df_slopes_detrended,
             json_data, experiment_dir, sub,
             saveNote=f'ALL-DET_fit{json_data["detrend_fitConstraint"]}',
-            subPath='2.detrend',
+            subPath='3.detrend',
             sharex=True
         )
         detrendedEpochs = epochs_detrended
         if json_data['sourceData']!='SIMS':
-            detrendedEpochs, json_data = notch_filter_offset_chans(detrendedEpochs, json_data)
+            # detrendedEpochs, json_data = notch_filter_offset_chans(detrendedEpochs, json_data) # ulteriore notch solo sui offset chans inutile
             post_label = f"fit{json_data['detrend_fitConstraint']}"
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='3.detrend', show=False)
         else:
             post_label = f"fit{json_data['detrend_fitConstraint']}"
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='3.detrend', show=False)
 
         
     # === CASE 2: detrend disattivato ===
@@ -1968,10 +2658,10 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
 
             order = json_data['detrend_noWindowedOrder']
             detrendedEpochs = detrendedEpochs.apply_function(lambda x: nonlinear_detrend(x, order=order))
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'overallPolyOrder{order}', subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'overallPolyOrder{order}', subPath='3.detrend', show=False)
 
     # === Salvataggio ===
-    pkl_path = Path(experiment_dir) / '6.pkls' / f'{sub}_detrendedEpochs.pkl'
+    pkl_path = Path(experiment_dir) / '7.pkls' / f'{sub}_detrendedEpochs.pkl'
     with open(pkl_path, 'wb') as f:
         pickle.dump(detrendedEpochs, f)
 
@@ -2111,7 +2801,7 @@ def prepare_epochs(raw, events, temp_epochs, json_data, experiment_dir, sub):
         subPath="1.basic"
     )
 
-    pkl_path = Path(experiment_dir) / "6.pkls" / f"{sub}_epochs.pkl"
+    pkl_path = Path(experiment_dir) / "7.pkls" / f"{sub}_epochs.pkl"
     with open(pkl_path, "wb") as f:
         pickle.dump(epochs, f)
 
@@ -2150,7 +2840,7 @@ def prepare_epochs(raw, events, temp_epochs, json_data, experiment_dir, sub):
     epochs = epochs.set_eeg_reference('average')
     basicPlots(epochs, json_data, experiment_dir, sub, key='epochs', subPath='1.basic')
 
-    pkl_path = Path(experiment_dir) / '6.pkls' / f'{sub}_epochs.pkl'
+    pkl_path = Path(experiment_dir) / '7.pkls' / f'{sub}_epochs.pkl'
     with open(pkl_path, 'wb') as f:
         pickle.dump(epochs, f)
 
@@ -2184,7 +2874,7 @@ def analyze_offset_times(epochs, json_data, experiment_dir, sub, do_plot_variabi
             ])
     
     df = pd.DataFrame(offsetTimes, columns=['chan', 'trial', 'toffsetmin', 'toffsetmax'])
-    df.to_csv(Path(experiment_dir) / '2.detrend' / 'offsetTimes_df.csv', index=False)
+    df.to_csv(Path(experiment_dir) / '3.detrend' / 'offsetTimes_df.csv', index=False)
 
     mean_offset = df['toffsetmax'].mean()
     std_offset = df['toffsetmax'].std()
@@ -2204,7 +2894,7 @@ def analyze_offset_times(epochs, json_data, experiment_dir, sub, do_plot_variabi
         for name in tqdm(epochs.ch_names):
             plotTrialTepVariability(epochs, json_data, experiment_dir, sub, chanNAME=name, operator=np.mean, save=True, parDir='preDetrend')
     
-    # see results in 3.trials
+    # see results in 2.trials
     return json_data, df
 
 from pathlib import Path
@@ -2261,7 +2951,7 @@ def check_detrend_need(epochs, json_data, experiment_dir, sub):
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2)
 
     plt.tight_layout()
-    plot_path = Path(experiment_dir) / '2.detrend' / 'histogram_toffsetmax_subplots.png'
+    plot_path = Path(experiment_dir) / '3.detrend' / 'histogram_toffsetmax_subplots.png'
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     
@@ -2275,7 +2965,7 @@ def check_detrend_need(epochs, json_data, experiment_dir, sub):
             json.dump(json_data, json_file, indent=4, sort_keys=True)
         
     # === Salvataggio CSV dei risultati ===
-    detrend_dir = Path(experiment_dir) / '2.detrend'
+    detrend_dir = Path(experiment_dir) / '3.detrend'
     detrend_dir.mkdir(parents=True, exist_ok=True)
 
     mean_df.to_csv(detrend_dir / 'mean_Zslope_per_chan_twindow.csv', index=False)
@@ -2300,7 +2990,969 @@ def add_TEP_to_json(json_file, postICA_final):
     print("[INFO] Aggiunte TEP_3d, TEP_2d, TEP_1d a json_file")
     return json_file
 
-def compute_pcist(postICA_final, json_data, experiment_dir, sub):
+def plot_pcist_transitions(
+    result,
+    pars,
+    out_dir,
+    sub,
+    max_components=6,
+    dpi=300
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    out_dir=Path(out_dir)
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    dnst=np.asarray(
+        result.get(
+            "dNST",
+            []
+        ),
+        dtype=float
+    )
+
+    signal_svd=np.asarray(
+        result.get(
+            "signal_svd",
+            []
+        ),
+        dtype=float
+    )
+
+    times=np.asarray(
+        result.get(
+            "times",
+            []
+        ),
+        dtype=float
+    )
+
+    d_base=np.asarray(
+        result.get(
+            "D_base",
+            []
+        ),
+        dtype=float
+    )
+
+    d_resp=np.asarray(
+        result.get(
+            "D_resp",
+            []
+        ),
+        dtype=float
+    )
+
+    t_base=np.asarray(
+        result.get(
+            "T_base",
+            []
+        ),
+        dtype=float
+    )
+
+    t_resp=np.asarray(
+        result.get(
+            "T_resp",
+            []
+        ),
+        dtype=float
+    )
+
+    thresholds=np.asarray(
+        result.get(
+            "thresholds",
+            []
+        ),
+        dtype=float
+    )
+
+    nst_base=np.asarray(
+        result.get(
+            "NST_base",
+            []
+        ),
+        dtype=float
+    )
+
+    nst_resp=np.asarray(
+        result.get(
+            "NST_resp",
+            []
+        ),
+        dtype=float
+    )
+
+    nst_diff=np.asarray(
+        result.get(
+            "NST_diff",
+            []
+        ),
+        dtype=float
+    )
+
+    max_thresholds=np.asarray(
+        result.get(
+            "max_thresholds",
+            []
+        ),
+        dtype=float
+    )
+
+    if dnst.size==0:
+        print(
+            "⚠️ Nessuna componente PCIst da plottare."
+        )
+        return {}
+
+    component_order=np.argsort(
+        dnst
+    )[::-1]
+
+    component_order=component_order[
+        :min(
+            max_components,
+            len(component_order)
+        )
+    ]
+
+    saved={}
+
+    if (
+        signal_svd.ndim==2
+        and times.size==signal_svd.shape[1]
+    ):
+        fig,axes=plt.subplots(
+            len(component_order),
+            1,
+            figsize=(
+                12,
+                max(
+                    3,
+                    2.5*len(component_order)
+                )
+            ),
+            sharex=True,
+            squeeze=False
+        )
+
+        for row,component in enumerate(
+            component_order
+        ):
+            axis=axes[row,0]
+
+            axis.plot(
+                times,
+                signal_svd[component],
+                linewidth=1.5
+            )
+
+            axis.axvspan(
+                pars["baseline_window"][0],
+                pars["baseline_window"][1],
+                alpha=0.15,
+                label="Baseline"
+            )
+
+            axis.axvspan(
+                pars["response_window"][0],
+                pars["response_window"][1],
+                alpha=0.15,
+                label="Response"
+            )
+
+            axis.axvline(
+                0,
+                linestyle="--",
+                linewidth=1
+            )
+
+            axis.set_ylabel(
+                f"PC {component+1}"
+            )
+
+            axis.set_title(
+                f"ΔNST={dnst[component]:.3f}"
+            )
+
+        axes[-1,0].set_xlabel(
+            "Time [ms]"
+        )
+
+        axes[0,0].legend(
+            loc="upper right"
+        )
+
+        fig.suptitle(
+            f"{sub} PCIst retained SVD components"
+        )
+
+        fig.tight_layout()
+
+        path=(
+            out_dir
+            /f"{sub}_PCIst_SVD_components.png"
+        )
+
+        fig.savefig(
+            path,
+            dpi=dpi,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        saved[
+            "svd_components"
+        ]=str(path)
+
+    if (
+        d_base.ndim==3
+        and d_resp.ndim==3
+    ):
+        fig,axes=plt.subplots(
+            len(component_order),
+            2,
+            figsize=(
+                10,
+                max(
+                    4,
+                    4*len(component_order)
+                )
+            ),
+            squeeze=False
+        )
+
+        for row,component in enumerate(
+            component_order
+        ):
+            vmax=max(
+                float(
+                    np.nanmax(
+                        d_base[component]
+                    )
+                ),
+                float(
+                    np.nanmax(
+                        d_resp[component]
+                    )
+                )
+            )
+
+            if not np.isfinite(vmax) or vmax<=0:
+                vmax=1.0
+
+            axes[row,0].imshow(
+                d_base[component],
+                origin="lower",
+                aspect="auto",
+                vmin=0,
+                vmax=vmax
+            )
+
+            image=axes[row,1].imshow(
+                d_resp[component],
+                origin="lower",
+                aspect="auto",
+                vmin=0,
+                vmax=vmax
+            )
+
+            axes[row,0].set_title(
+                f"PC {component+1} baseline distance"
+            )
+
+            axes[row,1].set_title(
+                f"PC {component+1} response distance"
+            )
+
+            axes[row,0].set_ylabel(
+                "Time sample"
+            )
+
+            axes[row,1].set_ylabel(
+                "Time sample"
+            )
+
+            fig.colorbar(
+                image,
+                ax=axes[row,:],
+                shrink=0.8,
+                label="State-space distance"
+            )
+
+        for axis in axes[-1,:]:
+            axis.set_xlabel(
+                "Time sample"
+            )
+
+        fig.suptitle(
+            f"{sub} PCIst distance matrices"
+        )
+
+        fig.tight_layout()
+
+        path=(
+            out_dir
+            /f"{sub}_PCIst_distance_matrices.png"
+        )
+
+        fig.savefig(
+            path,
+            dpi=dpi,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        saved[
+            "distance_matrices"
+        ]=str(path)
+
+    if (
+        t_base.ndim==3
+        and t_resp.ndim==3
+    ):
+        fig,axes=plt.subplots(
+            len(component_order),
+            2,
+            figsize=(
+                10,
+                max(
+                    4,
+                    4*len(component_order)
+                )
+            ),
+            squeeze=False
+        )
+
+        for row,component in enumerate(
+            component_order
+        ):
+            axes[row,0].imshow(
+                t_base[component],
+                origin="lower",
+                aspect="auto",
+                vmin=0,
+                vmax=1,
+                interpolation="nearest"
+            )
+
+            axes[row,1].imshow(
+                t_resp[component],
+                origin="lower",
+                aspect="auto",
+                vmin=0,
+                vmax=1,
+                interpolation="nearest"
+            )
+
+            axes[row,0].set_title(
+                f"PC {component+1} baseline transitions"
+            )
+
+            axes[row,1].set_title(
+                f"PC {component+1} response transitions"
+            )
+
+            axes[row,0].set_ylabel(
+                "Time sample"
+            )
+
+            axes[row,1].set_ylabel(
+                "Time sample"
+            )
+
+        for axis in axes[-1,:]:
+            axis.set_xlabel(
+                "Time sample"
+            )
+
+        fig.suptitle(
+            f"{sub} PCIst optimal transition matrices"
+        )
+
+        fig.tight_layout()
+
+        path=(
+            out_dir
+            /f"{sub}_PCIst_transition_matrices.png"
+        )
+
+        fig.savefig(
+            path,
+            dpi=dpi,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        saved[
+            "transition_matrices"
+        ]=str(path)
+
+    if (
+        thresholds.ndim==2
+        and nst_diff.ndim==2
+    ):
+        fig,axes=plt.subplots(
+            len(component_order),
+            1,
+            figsize=(
+                10,
+                max(
+                    3,
+                    2.8*len(component_order)
+                )
+            ),
+            squeeze=False
+        )
+
+        for row,component in enumerate(
+            component_order
+        ):
+            axis=axes[row,0]
+
+            axis.plot(
+                thresholds[:,component],
+                nst_diff[:,component],
+                linewidth=2,
+                label="NST response − k·NST baseline"
+            )
+
+            if (
+                nst_base.ndim==2
+                and nst_resp.ndim==2
+            ):
+                axis.plot(
+                    thresholds[:,component],
+                    nst_resp[:,component],
+                    linestyle="--",
+                    label="NST response"
+                )
+
+                axis.plot(
+                    thresholds[:,component],
+                    pars["k"]
+                    *nst_base[:,component],
+                    linestyle=":",
+                    label="k·NST baseline"
+                )
+
+            if component<max_thresholds.size:
+                axis.axvline(
+                    max_thresholds[component],
+                    linestyle="--",
+                    linewidth=1.5,
+                    label=(
+                        "Optimal threshold="
+                        f"{max_thresholds[component]:.3g}"
+                    )
+                )
+
+            axis.axhline(
+                0,
+                linewidth=1
+            )
+
+            axis.set_ylabel(
+                f"PC {component+1}"
+            )
+
+            axis.set_title(
+                f"ΔNST={dnst[component]:.3f}"
+            )
+
+            axis.legend(
+                loc="best",
+                fontsize=8
+            )
+
+        axes[-1,0].set_xlabel(
+            "State-distance threshold"
+        )
+
+        fig.suptitle(
+            f"{sub} PCIst threshold optimization"
+        )
+
+        fig.tight_layout()
+
+        path=(
+            out_dir
+            /f"{sub}_PCIst_NST_thresholds.png"
+        )
+
+        fig.savefig(
+            path,
+            dpi=dpi,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        saved[
+            "nst_thresholds"
+        ]=str(path)
+
+    if bool(
+        pars.get(
+            "embed",
+            False
+        )
+    ):
+        embedding_dimension=int(
+            pars.get(
+                "L",
+                0
+            )
+        )
+
+        embedding_delay=int(
+            pars.get(
+                "tau",
+                0
+            )
+        )
+
+        if (
+            signal_svd.ndim==2
+            and embedding_dimension>=2
+            and embedding_delay>=1
+        ):
+            component=int(
+                component_order[0]
+            )
+
+            x=signal_svd[
+                component
+            ]
+
+            cut=(
+                embedding_dimension-1
+            )*embedding_delay
+
+            if len(x)>cut:
+                embedded=np.vstack([
+                    x[
+                        cut-delay:
+                        len(x)-delay
+                    ]
+                    for delay in range(
+                        0,
+                        embedding_dimension
+                        *embedding_delay,
+                        embedding_delay
+                    )
+                ])
+
+                fig,axis=plt.subplots(
+                    figsize=(7,7)
+                )
+
+                axis.plot(
+                    embedded[0],
+                    embedded[1],
+                    linewidth=1
+                )
+
+                axis.scatter(
+                    embedded[0,0],
+                    embedded[1,0],
+                    s=60,
+                    label="Start"
+                )
+
+                axis.scatter(
+                    embedded[0,-1],
+                    embedded[1,-1],
+                    s=60,
+                    label="End"
+                )
+
+                axis.set_xlabel(
+                    "x(t)"
+                )
+
+                axis.set_ylabel(
+                    f"x(t−{embedding_delay} samples)"
+                )
+
+                axis.set_title(
+                    f"{sub} PCIst state-space trajectory\n"
+                    f"PC {component+1}, "
+                    f"L={embedding_dimension}, "
+                    f"τ={embedding_delay}"
+                )
+
+                axis.legend()
+                axis.grid(False)
+                fig.tight_layout()
+
+                path=(
+                    out_dir
+                    /f"{sub}_PCIst_state_space.png"
+                )
+
+                fig.savefig(
+                    path,
+                    dpi=dpi,
+                    bbox_inches="tight"
+                )
+
+                plt.close(fig)
+
+                saved[
+                    "state_space"
+                ]=str(path)
+
+    return saved
+
+
+
+
+def compute_pcist_baseline_sweep(
+    pci_st,
+    signal,
+    times_ms,
+    base_pars,
+    out_dir,
+    sub,
+    json_data
+):
+    from pathlib import Path
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    if not bool(json_data.get("pcist_baseline_sweep",True)):
+        return None,None
+
+    out_dir=Path(out_dir)
+    out_dir.mkdir(parents=True,exist_ok=True)
+
+    configured_start_ms=float(base_pars["baseline_window"][0])
+    configured_end_ms=float(base_pars["baseline_window"][1])
+
+    sweep_start_ms=float(
+        json_data.get(
+            "pcist_baseline_sweep_start_ms",
+            configured_start_ms
+        )
+    )
+
+    sweep_end_ms=float(
+        json_data.get(
+            "pcist_baseline_sweep_end_ms",
+            configured_end_ms
+        )
+    )
+
+    step_ms=float(
+        json_data.get(
+            "pcist_baseline_sweep_step_ms",
+            10.0
+        )
+    )
+
+    minimum_duration_ms=float(
+        json_data.get(
+            "pcist_baseline_sweep_min_duration_ms",
+            50.0
+        )
+    )
+
+    if step_ms<=0:
+        raise ValueError(
+            "pcist_baseline_sweep_step_ms deve essere > 0."
+        )
+
+    if minimum_duration_ms<=0:
+        raise ValueError(
+            "pcist_baseline_sweep_min_duration_ms deve essere > 0."
+        )
+
+    data_min_ms=float(np.min(times_ms))
+    data_max_ms=float(np.max(times_ms))
+
+    sweep_start_ms=max(sweep_start_ms,data_min_ms)
+    sweep_end_ms=min(sweep_end_ms,data_max_ms)
+
+    latest_start_ms=sweep_end_ms-minimum_duration_ms
+
+    if sweep_start_ms>=latest_start_ms:
+        raise ValueError(
+            "Intervallo insufficiente per il baseline sweep: "
+            f"start={sweep_start_ms:.3f} ms, "
+            f"end={sweep_end_ms:.3f} ms, "
+            f"minimum_duration={minimum_duration_ms:.3f} ms."
+        )
+
+    baseline_starts=np.arange(
+        latest_start_ms,
+        sweep_start_ms-step_ms*0.5,
+        -step_ms,
+        dtype=float
+    )
+
+    baseline_starts=np.sort(
+        np.unique(
+            np.append(
+                baseline_starts,
+                sweep_start_ms
+            )
+        )
+    )[::-1]
+
+    rows=[]
+
+    print("\n🔁 PCIst baseline sweep")
+    print(f"   Fixed baseline end: {sweep_end_ms:.1f} ms")
+    print(
+        f"   Start range: {baseline_starts.min():.1f}–"
+        f"{baseline_starts.max():.1f} ms"
+    )
+    print(f"   Step: {step_ms:.1f} ms")
+
+    for baseline_start_ms in baseline_starts:
+        duration_ms=float(
+            sweep_end_ms-baseline_start_ms
+        )
+
+        sweep_pars=dict(base_pars)
+        sweep_pars["baseline_window"]=(
+            float(baseline_start_ms),
+            float(sweep_end_ms)
+        )
+
+        try:
+            sweep_result=pci_st.calc_PCIst(
+                signal,
+                times_ms,
+                full_return=False,
+                **sweep_pars
+            )
+
+            if isinstance(sweep_result,dict):
+                pci_sweep=float(sweep_result["PCI"])
+            elif isinstance(sweep_result,(tuple,list)):
+                pci_sweep=float(sweep_result[0])
+            else:
+                pci_sweep=float(sweep_result)
+
+            status="ok"
+
+            print(
+                f"   [{baseline_start_ms:.1f},"
+                f"{sweep_end_ms:.1f}] ms | "
+                f"duration={duration_ms:.1f} ms | "
+                f"PCIst={pci_sweep:.4f}"
+            )
+
+        except Exception as error:
+            pci_sweep=np.nan
+            status=repr(error)
+
+            print(
+                f"⚠️ Sweep baseline "
+                f"[{baseline_start_ms:.1f},"
+                f"{sweep_end_ms:.1f}] ms: {error}"
+            )
+
+        rows.append({
+            "subject":str(sub),
+            "baseline_start_ms":float(baseline_start_ms),
+            "baseline_end_ms":float(sweep_end_ms),
+            "baseline_duration_ms":duration_ms,
+            "PCIst":(
+                float(pci_sweep)
+                if np.isfinite(pci_sweep)
+                else np.nan
+            ),
+            "status":status
+        })
+
+    df_sweep=pd.DataFrame(rows)
+
+    valid_df=(
+        df_sweep[
+            np.isfinite(df_sweep["PCIst"])
+        ]
+        .copy()
+        .sort_values("baseline_start_ms")
+    )
+
+    if valid_df.empty:
+        raise RuntimeError(
+            "Nessun valore PCIst valido nel baseline sweep."
+        )
+
+    csv_path=out_dir/f"{sub}_PCIst_baseline_sweep.csv"
+
+    df_sweep.to_csv(
+        csv_path,
+        index=False
+    )
+
+    curve_path=(
+        out_dir
+        /f"{sub}_PCIst_baseline_start_vs_PCIst.png"
+    )
+
+    fig,ax=plt.subplots(figsize=(9,6))
+
+    ax.plot(
+        valid_df["baseline_start_ms"],
+        valid_df["PCIst"],
+        marker="o",
+        linewidth=2
+    )
+
+    ax.set_xlabel("Baseline start [ms]")
+    ax.set_ylabel("PCIst")
+    ax.set_title(
+        f"{sub} PCIst versus baseline start\n"
+        f"fixed baseline end = {sweep_end_ms:.1f} ms"
+    )
+    ax.grid(True,alpha=0.3)
+    fig.tight_layout()
+
+    fig.savefig(
+        curve_path,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(fig)
+
+    distribution_path=(
+        out_dir
+        /f"{sub}_PCIst_baseline_sweep_distribution.png"
+    )
+
+    pci_values=valid_df["PCIst"].to_numpy(dtype=float)
+
+    n_bins=min(
+        20,
+        max(
+            5,
+            int(np.ceil(np.sqrt(len(pci_values))))
+        )
+    )
+
+    pci_mean=float(np.mean(pci_values))
+    pci_median=float(np.median(pci_values))
+    pci_std=(
+        float(np.std(pci_values,ddof=1))
+        if len(pci_values)>1
+        else 0.0
+    )
+
+    fig,ax=plt.subplots(figsize=(8,6))
+
+    ax.hist(
+        pci_values,
+        bins=n_bins,
+        edgecolor="black",
+        alpha=0.75
+    )
+
+    ax.axvline(
+        pci_mean,
+        linestyle="--",
+        linewidth=2,
+        label=f"Mean={pci_mean:.3f}"
+    )
+
+    ax.axvline(
+        pci_median,
+        linestyle=":",
+        linewidth=2,
+        label=f"Median={pci_median:.3f}"
+    )
+
+    ax.set_xlabel("PCIst")
+    ax.set_ylabel("Baseline windows")
+    ax.set_title(
+        f"{sub} PCIst baseline-sweep distribution\n"
+        f"mean ± SD = {pci_mean:.3f} ± {pci_std:.3f}"
+    )
+    ax.legend()
+    fig.tight_layout()
+
+    fig.savefig(
+        distribution_path,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(fig)
+
+    summary={
+        "enabled":True,
+        "fixed_baseline_end_ms":float(sweep_end_ms),
+        "maximum_baseline_start_ms":float(sweep_start_ms),
+        "minimum_baseline_duration_ms":float(minimum_duration_ms),
+        "step_ms":float(step_ms),
+        "n_windows_requested":int(len(df_sweep)),
+        "n_windows_valid":int(len(valid_df)),
+        "PCIst_mean":pci_mean,
+        "PCIst_median":pci_median,
+        "PCIst_std":pci_std,
+        "PCIst_min":float(np.min(pci_values)),
+        "PCIst_max":float(np.max(pci_values)),
+        "PCIst_range":float(np.ptp(pci_values)),
+        "PCIst_coefficient_of_variation":(
+            float(pci_std/abs(pci_mean))
+            if pci_mean!=0
+            else None
+        ),
+        "csv":str(csv_path),
+        "curve":str(curve_path),
+        "distribution":str(distribution_path)
+    }
+
+    summary_path=(
+        out_dir
+        /f"{sub}_PCIst_baseline_sweep_summary.json"
+    )
+
+    with open(
+        summary_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            summary,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    summary["summary_json"]=str(summary_path)
+
+    print("✅ PCIst baseline sweep completed")
+    print(
+        f"   Valid windows: "
+        f"{len(valid_df)}/{len(df_sweep)}"
+    )
+    print(
+        f"   PCIst mean ± SD: "
+        f"{pci_mean:.3f} ± {pci_std:.3f}"
+    )
+
+    return df_sweep,summary
+
+
+def compute_pcist(postICA_final,json_data,experiment_dir,sub):
     from pathlib import Path
     import json
     import numpy as np
@@ -2330,161 +3982,1424 @@ def compute_pcist(postICA_final, json_data, experiment_dir, sub):
             "issue":5,
             "pages":"1280-1289",
             "doi":"10.1016/j.brs.2019.05.013",
-            "article_url":"https://www.sciencedirect.com/science/article/pii/S1935861X19302207"
+            "article_url":(
+                "https://www.sciencedirect.com/science/article/"
+                "pii/S1935861X19302207"
+            )
         }
     }
-    
+
     try:
         from PCIst import pci_st
     except ImportError as exc:
-        raise ImportError("PCIst non installato. Eseguire: pip install PCIst") from exc
+        raise ImportError(
+            "PCIst non installato. Eseguire: pip install PCIst"
+        ) from exc
 
-    evoked = postICA_final.average()
-    signal = evoked.get_data()
-    times_ms = evoked.times * 1000.0
+    out_dir=(
+        Path(experiment_dir)
+        /"5.Extra"
+        /"FE"
+        /"PCIst"
+    )
 
-    pars = {
-        "baseline_window": tuple(json_data.get("pcist_baseline_window_ms", (-400, -50))),
-        "response_window": tuple(json_data.get("pcist_response_window_ms", (0, 300))),
-        "k": float(json_data.get("pcist_k", 1.2)),
-        "min_snr": float(json_data.get("pcist_min_snr", 1.1)),
-        "max_var": float(json_data.get("pcist_max_var", 99)),
-        "embed": bool(json_data.get("pcist_embed", False)),
-        "n_steps": int(json_data.get("pcist_n_steps", 100)),
-        "avgref": False,
-        "baseline_corr": bool(json_data.get("pcist_baseline_corr", False))
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    evoked=postICA_final.average()
+
+    signal=np.asarray(
+        evoked.get_data(),
+        dtype=float
+    )
+
+    times_ms=np.asarray(
+        evoked.times,
+        dtype=float
+    )*1000.0
+
+    embed=bool(
+        json_data.get(
+            "pcist_embed",
+            False
+        )
+    )
+
+    pars={
+        "baseline_window":tuple(
+            json_data.get(
+                "pcist_baseline_window_ms",
+                (-400,-50)
+            )
+        ),
+        "response_window":tuple(
+            json_data.get(
+                "pcist_response_window_ms",
+                (0,300)
+            )
+        ),
+        "k":float(
+            json_data.get(
+                "pcist_k",
+                1.2
+            )
+        ),
+        "min_snr":float(
+            json_data.get(
+                "pcist_min_snr",
+                1.1
+            )
+        ),
+        "max_var":float(
+            json_data.get(
+                "pcist_max_var",
+                99
+            )
+        ),
+        "embed":embed,
+        "n_steps":int(
+            json_data.get(
+                "pcist_n_steps",
+                100
+            )
+        ),
+        "avgref":False,
+        "baseline_corr":bool(
+            json_data.get(
+                "pcist_baseline_corr",
+                False
+            )
+        )
     }
 
-    required_min = min(pars["baseline_window"])
-    required_max = max(pars["response_window"])
-    if times_ms.min() > required_min or times_ms.max() < required_max:
-        raise ValueError(
-            f"Finestra PCIst non contenuta nelle epoche: dati "
-            f"[{times_ms.min():.1f}, {times_ms.max():.1f}] ms, richiesta "
-            f"[{required_min}, {required_max}] ms. Estendere epochs_timewindow_min/max."
+    if embed:
+        pars["L"]=int(
+            json_data.get(
+                "pcist_embedding_dimension",
+                3
+            )
         )
 
-    result = pci_st.calc_PCIst(signal, times_ms, full_return=True, **pars)
-    pci_value = float(result["PCI"])
-    dnst = np.asarray(result["dNST"], dtype=float)
-    dnst_mean = float(np.mean(dnst)) if dnst.size > 0 else float("nan")
+        pars["tau"]=int(
+            json_data.get(
+                "pcist_embedding_delay_samples",
+                4
+            )
+        )
 
-    out_dir = Path(experiment_dir) / "5.Extra" / "FE" / "PCIst"
-    out_dir.mkdir(parents=True, exist_ok=True)
+        if pars["L"]<2:
+            raise ValueError(
+                "pcist_embedding_dimension deve essere almeno 2."
+            )
 
-    pd.DataFrame({"component": np.arange(1, len(dnst) + 1), "dNST": dnst}).to_csv(
-        out_dir / f"{sub}_PCIst_components.csv", index=False
+        if pars["tau"]<1:
+            raise ValueError(
+                "pcist_embedding_delay_samples deve essere almeno 1."
+            )
+
+    safe_margin_ms=float(
+        json_data.get(
+            "pcist_safe_margin_ms",
+            2.0
+        )
     )
+
+    data_min_ms=float(
+        times_ms.min()
+    )
+
+    data_max_ms=float(
+        times_ms.max()
+    )
+
+    baseline_start_ms=float(
+        pars["baseline_window"][0]
+    )
+
+    baseline_end_ms=float(
+        pars["baseline_window"][1]
+    )
+
+    response_start_ms=float(
+        pars["response_window"][0]
+    )
+
+    response_end_ms=float(
+        pars["response_window"][1]
+    )
+
+    if baseline_start_ms<data_min_ms:
+        baseline_start_ms=(
+            data_min_ms
+            +safe_margin_ms
+        )
+
+    if baseline_end_ms>data_max_ms:
+        baseline_end_ms=(
+            data_max_ms
+            -safe_margin_ms
+        )
+
+    if response_start_ms<data_min_ms:
+        response_start_ms=(
+            data_min_ms
+            +safe_margin_ms
+        )
+
+    if response_end_ms>data_max_ms:
+        response_end_ms=(
+            data_max_ms
+            -safe_margin_ms
+        )
+
+    pars["baseline_window"]=(
+        baseline_start_ms,
+        baseline_end_ms
+    )
+
+    pars["response_window"]=(
+        response_start_ms,
+        response_end_ms
+    )
+
+    if baseline_start_ms>=baseline_end_ms:
+        raise ValueError(
+            "Baseline PCIst non valida dopo l'adattamento: "
+            f"{pars['baseline_window']} ms."
+        )
+
+    if response_start_ms>=response_end_ms:
+        raise ValueError(
+            "Finestra di risposta PCIst non valida dopo l'adattamento: "
+            f"{pars['response_window']} ms."
+        )
+
+    print(
+        "🕒 PCIst windows | "
+        f"baseline={pars['baseline_window']} ms | "
+        f"response={pars['response_window']} ms | "
+        f"available=({data_min_ms:.3f},{data_max_ms:.3f}) ms"
+    )
+
+    print(
+        "🧭 PCIst embedding | "
+        f"enabled={embed}"
+        +(
+            f" | L={pars['L']} | tau={pars['tau']} samples"
+            if embed
+            else ""
+        )
+    )
+
+    result=pci_st.calc_PCIst(
+        signal,
+        times_ms,
+        full_return=True,
+        **pars
+    )
+
+    pci_value=float(
+        result["PCI"]
+    )
+
+    baseline_sweep_df,baseline_sweep_summary=(
+        compute_pcist_baseline_sweep(
+            pci_st=pci_st,
+            signal=signal,
+            times_ms=times_ms,
+            base_pars=pars,
+            out_dir=out_dir,
+            sub=sub,
+            json_data=json_data
+        )
+    )
+
+    dnst=np.asarray(
+        result.get(
+            "dNST",
+            []
+        ),
+        dtype=float
+    )
+
+    n_dims=int(
+        result.get(
+            "n_dims",
+            len(dnst)
+        )
+    )
+
+    dnst_mean=(
+        float(
+            np.mean(
+                dnst
+            )
+        )
+        if dnst.size
+        else float("nan")
+    )
+
+    def get_array(key):
+        value=result.get(
+            key,
+            None
+        )
+
+        if value is None:
+            return None
+
+        try:
+            array=np.asarray(
+                value
+            )
+
+            if array.size==0:
+                return None
+
+            return array
+
+        except Exception:
+            return None
+
+    signal_svd=get_array(
+        "signal_svd"
+    )
+
+    result_times=get_array(
+        "times"
+    )
+
+    if result_times is None:
+        result_times=times_ms.copy()
+
+    pd.DataFrame({
+        "component":np.arange(
+            1,
+            len(dnst)+1
+        ),
+        "dNST":dnst
+    }).to_csv(
+        out_dir/f"{sub}_PCIst_components.csv",
+        index=False
+    )
+
+    npz_content={
+        "PCI":np.asarray(
+            pci_value
+        ),
+        "dNST":dnst,
+        "n_dims":np.asarray(
+            n_dims
+        )
+    }
+
+    possible_arrays=[
+        "signal_evk",
+        "signal_svd",
+        "eigenvalues",
+        "var_exp",
+        "snrs",
+        "times",
+        "D_base",
+        "D_resp",
+        "T_base",
+        "T_resp",
+        "thresholds",
+        "NST_base",
+        "NST_resp",
+        "NST_diff",
+        "max_thresholds"
+    ]
+
+    for key in possible_arrays:
+        value=get_array(
+            key
+        )
+
+        if value is not None:
+            npz_content[
+                key
+            ]=value
+
     np.savez_compressed(
-        out_dir / f"{sub}_PCIst_full.npz",
-        PCI=pci_value,
-        dNST=dnst,
-        signal_svd=np.asarray(result["signal_svd"]),
-        eigenvalues=np.asarray(result["eigenvalues"]),
-        var_exp=np.asarray(result["var_exp"]),
-        snrs=np.asarray(result["snrs"]),
-        times=np.asarray(result["times"])
+        out_dir/f"{sub}_PCIst_full.npz",
+        **npz_content
     )
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(np.arange(1, len(dnst) + 1), dnst)
-    ax.set_xlabel("SVD component")
-    ax.set_ylabel("ΔNST")
-    ax.set_title(f"{sub} PCIst = {pci_value:.3f}")
+    generated_plots={}
+
+    fig,ax=plt.subplots(
+        figsize=(8,5)
+    )
+
+    ax.bar(
+        np.arange(
+            1,
+            len(dnst)+1
+        ),
+        dnst
+    )
+
+    ax.axhline(
+        0,
+        linewidth=1
+    )
+
+    ax.set_xlabel(
+        "SVD component"
+    )
+
+    ax.set_ylabel(
+        "ΔNST"
+    )
+
+    ax.set_title(
+        f"{sub} PCIst = {pci_value:.3f}"
+    )
+
     fig.tight_layout()
-    fig.savefig(out_dir / f"{sub}_PCIst_components.png", dpi=300)
+
+    components_path=(
+        out_dir
+        /f"{sub}_PCIst_components.png"
+    )
+
+    fig.savefig(
+        components_path,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
     plt.close(fig)
+
+    generated_plots[
+        "components"
+    ]=str(
+        components_path
+    )
+
+    max_plot_components=int(
+        json_data.get(
+            "pcist_plot_max_components",
+            6
+        )
+    )
+
+    if dnst.size:
+        component_order=np.argsort(
+            dnst
+        )[::-1]
+
+        component_order=component_order[
+            :min(
+                max_plot_components,
+                len(component_order)
+            )
+        ]
+
+    else:
+        component_order=np.asarray(
+            [],
+            dtype=int
+        )
+
+    if (
+        signal_svd is not None
+        and signal_svd.ndim==2
+        and component_order.size
+    ):
+        component_times=np.asarray(
+            result_times,
+            dtype=float
+        ).ravel()
+
+        if (
+            component_times.size
+            !=signal_svd.shape[1]
+        ):
+            component_times=np.arange(
+                signal_svd.shape[1],
+                dtype=float
+            )
+
+            x_label="Sample"
+
+        else:
+            x_label="Time [ms]"
+
+        fig,axes=plt.subplots(
+            len(component_order),
+            1,
+            figsize=(
+                12,
+                max(
+                    3,
+                    2.4*len(component_order)
+                )
+            ),
+            sharex=True,
+            squeeze=False
+        )
+
+        for row,component in enumerate(
+            component_order
+        ):
+            axis=axes[
+                row,
+                0
+            ]
+
+            axis.plot(
+                component_times,
+                signal_svd[
+                    component
+                ],
+                linewidth=1.5
+            )
+
+            if x_label=="Time [ms]":
+                axis.axvspan(
+                    baseline_start_ms,
+                    baseline_end_ms,
+                    alpha=0.12,
+                    label="Baseline"
+                )
+
+                axis.axvspan(
+                    response_start_ms,
+                    response_end_ms,
+                    alpha=0.12,
+                    label="Response"
+                )
+
+                axis.axvline(
+                    0,
+                    linestyle="--",
+                    linewidth=1
+                )
+
+            axis.set_ylabel(
+                f"PC {component+1}"
+            )
+
+            axis.set_title(
+                f"ΔNST={dnst[component]:.3f}"
+            )
+
+        axes[-1,0].set_xlabel(
+            x_label
+        )
+
+        axes[0,0].legend(
+            loc="upper right"
+        )
+
+        fig.suptitle(
+            f"{sub} retained PCIst SVD components"
+        )
+
+        fig.tight_layout()
+
+        path=(
+            out_dir
+            /f"{sub}_PCIst_SVD_components.png"
+        )
+
+        fig.savefig(
+            path,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+        generated_plots[
+            "svd_components"
+        ]=str(path)
+
+    d_base=get_array(
+        "D_base"
+    )
+
+    d_resp=get_array(
+        "D_resp"
+    )
+
+    if (
+        d_base is not None
+        and d_resp is not None
+        and d_base.ndim==3
+        and d_resp.ndim==3
+        and component_order.size
+    ):
+        valid_components=[
+            int(component)
+            for component in component_order
+            if (
+                component<d_base.shape[0]
+                and component<d_resp.shape[0]
+            )
+        ]
+
+        if valid_components:
+            fig,axes=plt.subplots(
+                len(valid_components),
+                2,
+                figsize=(
+                    11,
+                    max(
+                        4,
+                        3.8*len(valid_components)
+                    )
+                ),
+                squeeze=False
+            )
+
+            for row,component in enumerate(
+                valid_components
+            ):
+                vmax=float(
+                    np.nanmax([
+                        np.nanmax(
+                            d_base[component]
+                        ),
+                        np.nanmax(
+                            d_resp[component]
+                        )
+                    ])
+                )
+
+                if (
+                    not np.isfinite(vmax)
+                    or vmax<=0
+                ):
+                    vmax=1.0
+
+                axes[row,0].imshow(
+                    d_base[component],
+                    origin="lower",
+                    aspect="auto",
+                    vmin=0,
+                    vmax=vmax
+                )
+
+                image=axes[row,1].imshow(
+                    d_resp[component],
+                    origin="lower",
+                    aspect="auto",
+                    vmin=0,
+                    vmax=vmax
+                )
+
+                axes[row,0].set_title(
+                    f"PC {component+1} baseline distances"
+                )
+
+                axes[row,1].set_title(
+                    f"PC {component+1} response distances"
+                )
+
+                axes[row,0].set_ylabel(
+                    "State-time sample"
+                )
+
+                axes[row,1].set_ylabel(
+                    "State-time sample"
+                )
+
+                fig.colorbar(
+                    image,
+                    ax=axes[row,:],
+                    shrink=0.8,
+                    label="Distance"
+                )
+
+            axes[-1,0].set_xlabel(
+                "State-time sample"
+            )
+
+            axes[-1,1].set_xlabel(
+                "State-time sample"
+            )
+
+            fig.suptitle(
+                f"{sub} PCIst state-distance matrices"
+            )
+
+            fig.tight_layout()
+
+            path=(
+                out_dir
+                /f"{sub}_PCIst_distance_matrices.png"
+            )
+
+            fig.savefig(
+                path,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close(fig)
+
+            generated_plots[
+                "distance_matrices"
+            ]=str(path)
+
+    t_base=get_array(
+        "T_base"
+    )
+
+    t_resp=get_array(
+        "T_resp"
+    )
+
+    if (
+        t_base is not None
+        and t_resp is not None
+        and t_base.ndim==3
+        and t_resp.ndim==3
+        and component_order.size
+    ):
+        valid_components=[
+            int(component)
+            for component in component_order
+            if (
+                component<t_base.shape[0]
+                and component<t_resp.shape[0]
+            )
+        ]
+
+        if valid_components:
+            fig,axes=plt.subplots(
+                len(valid_components),
+                2,
+                figsize=(
+                    11,
+                    max(
+                        4,
+                        3.8*len(valid_components)
+                    )
+                ),
+                squeeze=False
+            )
+
+            for row,component in enumerate(
+                valid_components
+            ):
+                axes[row,0].imshow(
+                    t_base[component],
+                    origin="lower",
+                    aspect="auto",
+                    interpolation="nearest",
+                    vmin=0,
+                    vmax=1
+                )
+
+                axes[row,1].imshow(
+                    t_resp[component],
+                    origin="lower",
+                    aspect="auto",
+                    interpolation="nearest",
+                    vmin=0,
+                    vmax=1
+                )
+
+                axes[row,0].set_title(
+                    f"PC {component+1} baseline transitions"
+                )
+
+                axes[row,1].set_title(
+                    f"PC {component+1} response transitions"
+                )
+
+                axes[row,0].set_ylabel(
+                    "State-time sample"
+                )
+
+                axes[row,1].set_ylabel(
+                    "State-time sample"
+                )
+
+            axes[-1,0].set_xlabel(
+                "State-time sample"
+            )
+
+            axes[-1,1].set_xlabel(
+                "State-time sample"
+            )
+
+            fig.suptitle(
+                f"{sub} PCIst optimal transition matrices"
+            )
+
+            fig.tight_layout()
+
+            path=(
+                out_dir
+                /f"{sub}_PCIst_transition_matrices.png"
+            )
+
+            fig.savefig(
+                path,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close(fig)
+
+            generated_plots[
+                "transition_matrices"
+            ]=str(path)
+
+    thresholds=get_array(
+        "thresholds"
+    )
+
+    nst_base=get_array(
+        "NST_base"
+    )
+
+    nst_resp=get_array(
+        "NST_resp"
+    )
+
+    nst_diff=get_array(
+        "NST_diff"
+    )
+
+    max_thresholds=get_array(
+        "max_thresholds"
+    )
+
+    if (
+        thresholds is not None
+        and nst_diff is not None
+        and thresholds.ndim==2
+        and nst_diff.ndim==2
+        and component_order.size
+    ):
+        valid_components=[
+            int(component)
+            for component in component_order
+            if (
+                component<thresholds.shape[1]
+                and component<nst_diff.shape[1]
+            )
+        ]
+
+        if valid_components:
+            fig,axes=plt.subplots(
+                len(valid_components),
+                1,
+                figsize=(
+                    11,
+                    max(
+                        3,
+                        2.8*len(valid_components)
+                    )
+                ),
+                squeeze=False
+            )
+
+            for row,component in enumerate(
+                valid_components
+            ):
+                axis=axes[
+                    row,
+                    0
+                ]
+
+                axis.plot(
+                    thresholds[
+                        :,
+                        component
+                    ],
+                    nst_diff[
+                        :,
+                        component
+                    ],
+                    linewidth=2,
+                    label="NST difference"
+                )
+
+                if (
+                    nst_resp is not None
+                    and nst_base is not None
+                    and nst_resp.ndim==2
+                    and nst_base.ndim==2
+                    and component<nst_resp.shape[1]
+                    and component<nst_base.shape[1]
+                ):
+                    axis.plot(
+                        thresholds[
+                            :,
+                            component
+                        ],
+                        nst_resp[
+                            :,
+                            component
+                        ],
+                        linestyle="--",
+                        label="NST response"
+                    )
+
+                    axis.plot(
+                        thresholds[
+                            :,
+                            component
+                        ],
+                        pars["k"]
+                        *nst_base[
+                            :,
+                            component
+                        ],
+                        linestyle=":",
+                        label="k × NST baseline"
+                    )
+
+                if (
+                    max_thresholds is not None
+                    and component
+                    <max_thresholds.size
+                ):
+                    axis.axvline(
+                        float(
+                            max_thresholds[
+                                component
+                            ]
+                        ),
+                        linestyle="--",
+                        linewidth=1.5,
+                        label="Optimal threshold"
+                    )
+
+                axis.axhline(
+                    0,
+                    linewidth=1
+                )
+
+                axis.set_ylabel(
+                    f"PC {component+1}"
+                )
+
+                axis.set_title(
+                    f"ΔNST={dnst[component]:.3f}"
+                )
+
+                axis.legend(
+                    loc="best",
+                    fontsize=8
+                )
+
+            axes[-1,0].set_xlabel(
+                "Distance threshold"
+            )
+
+            fig.suptitle(
+                f"{sub} PCIst threshold optimization"
+            )
+
+            fig.tight_layout()
+
+            path=(
+                out_dir
+                /f"{sub}_PCIst_NST_thresholds.png"
+            )
+
+            fig.savefig(
+                path,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close(fig)
+
+            generated_plots[
+                "threshold_optimization"
+            ]=str(path)
+
+    if (
+        embed
+        and signal_svd is not None
+        and signal_svd.ndim==2
+        and component_order.size
+    ):
+        embedding_dimension=int(
+            pars["L"]
+        )
+
+        embedding_delay=int(
+            pars["tau"]
+        )
+
+        component=int(
+            component_order[0]
+        )
+
+        x=np.asarray(
+            signal_svd[
+                component
+            ],
+            dtype=float
+        )
+
+        maximum_lag=(
+            embedding_dimension-1
+        )*embedding_delay
+
+        if len(x)>maximum_lag:
+            embedded=np.column_stack([
+                x[
+                    maximum_lag-lag:
+                    len(x)-lag
+                ]
+                for lag in range(
+                    0,
+                    embedding_dimension
+                    *embedding_delay,
+                    embedding_delay
+                )
+            ])
+
+            embedded_times=np.asarray(
+                result_times
+            ).ravel()
+
+            if (
+                embedded_times.size
+                ==len(x)
+            ):
+                embedded_times=embedded_times[
+                    maximum_lag:
+                ]
+            else:
+                embedded_times=np.arange(
+                    embedded.shape[0]
+                )
+
+            if embedding_dimension>=3:
+                fig=plt.figure(
+                    figsize=(9,7)
+                )
+
+                axis=fig.add_subplot(
+                    111,
+                    projection="3d"
+                )
+
+                scatter=axis.scatter(
+                    embedded[:,0],
+                    embedded[:,1],
+                    embedded[:,2],
+                    c=embedded_times,
+                    s=12
+                )
+
+                axis.plot(
+                    embedded[:,0],
+                    embedded[:,1],
+                    embedded[:,2],
+                    linewidth=0.6,
+                    alpha=0.6
+                )
+
+                axis.set_xlabel(
+                    "x(t)"
+                )
+
+                axis.set_ylabel(
+                    f"x(t-{embedding_delay})"
+                )
+
+                axis.set_zlabel(
+                    f"x(t-{2*embedding_delay})"
+                )
+
+                fig.colorbar(
+                    scatter,
+                    ax=axis,
+                    label="Time [ms]"
+                )
+
+            else:
+                fig,axis=plt.subplots(
+                    figsize=(8,7)
+                )
+
+                scatter=axis.scatter(
+                    embedded[:,0],
+                    embedded[:,1],
+                    c=embedded_times,
+                    s=14
+                )
+
+                axis.plot(
+                    embedded[:,0],
+                    embedded[:,1],
+                    linewidth=0.6,
+                    alpha=0.6
+                )
+
+                axis.set_xlabel(
+                    "x(t)"
+                )
+
+                axis.set_ylabel(
+                    f"x(t-{embedding_delay})"
+                )
+
+                fig.colorbar(
+                    scatter,
+                    ax=axis,
+                    label="Time [ms]"
+                )
+
+            axis.set_title(
+                f"{sub} PCIst delay embedding\n"
+                f"PC {component+1}, "
+                f"L={embedding_dimension}, "
+                f"τ={embedding_delay} samples"
+            )
+
+            fig.tight_layout()
+
+            path=(
+                out_dir
+                /f"{sub}_PCIst_state_space_embedding.png"
+            )
+
+            fig.savefig(
+                path,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close(fig)
+
+            generated_plots[
+                "state_space_embedding"
+            ]=str(path)
+
+    result_keys=sorted(
+        [
+            str(key)
+            for key in result.keys()
+        ]
+    )
 
     summary={
         "subject":str(sub),
         "PCI":pci_value,
-        "n_dims":int(result["n_dims"]),
+        "n_dims":n_dims,
         "dNST":dnst.tolist(),
+        "dNST_mean":dnst_mean,
         "parameters":pars,
-        "input_shape":list(signal.shape),
+        "embedding_enabled":embed,
+        "input_shape":list(
+            signal.shape
+        ),
         "time_range_ms":[
-            float(times_ms.min()),
-            float(times_ms.max())
+            data_min_ms,
+            data_max_ms
         ],
+        "result_keys":result_keys,
+        "generated_plots":generated_plots,
+        "baseline_sweep":baseline_sweep_summary,
         "reference":pcist_reference
     }
-    with open(out_dir / f"{sub}_PCIst_summary.json", "w") as f:
-        json.dump(summary, f, indent=4)
-    
-    json_data["PCIst_reference"]=pcist_reference
-    json_data["PCIst_software_repository"]=pcist_reference["software"]["repository"]
-    json_data["PCIst_paper_citation"]=pcist_reference["paper"]["citation"]
-    json_data["PCIst_paper_doi"]=pcist_reference["paper"]["doi"]
-    json_data["PCIst_paper_url"]=pcist_reference["paper"]["article_url"]
+
+    summary_path=(
+        out_dir
+        /f"{sub}_PCIst_summary.json"
+    )
+
+    with open(
+        summary_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            summary,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    json_data[
+        "PCIst"
+    ]=pci_value
+
+    json_data[
+        "PCIst_n_dims"
+    ]=n_dims
+
+    json_data[
+        "PCIst_dNST"
+    ]=dnst.tolist()
+
+    json_data[
+        "PCIst_dNST_mean"
+    ]=dnst_mean
+
+    json_data[
+        "PCIst_parameters"
+    ]=pars
+
+    json_data[
+        "PCIst_embedding_used"
+    ]=embed
+
+    json_data[
+        "PCIst_result_keys"
+    ]=result_keys
+
+    json_data[
+        "PCIst_generated_plots"
+    ]=generated_plots
+
+    json_data[
+        "PCIst_baseline_sweep"
+    ]=baseline_sweep_summary
+
+    if baseline_sweep_summary is not None:
+        json_data[
+            "PCIst_baseline_sweep_mean"
+        ]=float(
+            baseline_sweep_summary["PCIst_mean"]
+        )
+
+        json_data[
+            "PCIst_baseline_sweep_std"
+        ]=float(
+            baseline_sweep_summary["PCIst_std"]
+        )
+
+        json_data[
+            "PCIst_baseline_sweep_range"
+        ]=float(
+            baseline_sweep_summary["PCIst_range"]
+        )
+
+    json_data[
+        "PCIst_output_dir"
+    ]=str(
+        out_dir
+    )
+
+    json_data[
+        "PCIst_summary_json"
+    ]=str(
+        summary_path
+    )
+
+    json_data[
+        "PCIst_full_npz"
+    ]=str(
+        out_dir
+        /f"{sub}_PCIst_full.npz"
+    )
+
+    json_data[
+        "PCIst_reference"
+    ]=pcist_reference
+
+    json_data[
+        "PCIst_software_repository"
+    ]=pcist_reference[
+        "software"
+    ][
+        "repository"
+    ]
+
+    json_data[
+        "PCIst_paper_citation"
+    ]=pcist_reference[
+        "paper"
+    ][
+        "citation"
+    ]
+
+    json_data[
+        "PCIst_paper_doi"
+    ]=pcist_reference[
+        "paper"
+    ][
+        "doi"
+    ]
+
+    json_data[
+        "PCIst_paper_url"
+    ]=pcist_reference[
+        "paper"
+    ][
+        "article_url"
+    ]
 
     print(
         f"✅ PCIst = {pci_value:.3f} | "
-        f"retained dimensions = {result['n_dims']}"
+        f"retained dimensions = {n_dims}"
     )
-    
+
+    print(
+        "   Result keys:",
+        result_keys
+    )
+
+    print(
+        "   Generated plots:",
+        list(
+            generated_plots.keys()
+        )
+    )
+
+    if embed:
+        print(
+            "   Delay embedding enabled: "
+            f"L={pars['L']}, "
+            f"tau={pars['tau']} samples"
+        )
+    else:
+        print(
+            "   Delay embedding disabled; "
+            "transition matrices are still plotted "
+            "when returned by PCIst."
+        )
+
     print(
         "📚 PCIst reference: Comolatti R et al., "
         "Brain Stimulation, 2019;12(5):1280-1289. "
         "doi:10.1016/j.brs.2019.05.013"
     )
-    
+
     print(
         "💻 PCIst software: "
         "https://github.com/renzocom/PCIst"
     )
-    return pci_value, result, json_data
 
+    return pci_value,result,json_data
 
-
-def ICAprocessing(file,
-                  json_data, experiment_dir, sub,
-                  autoReject=True,
-                  manualCheck=True, 
-                  computeFOOOF=False):
+def ICAprocessing(
+    file,
+    json_data,
+    experiment_dir,
+    sub,
+    autoReject=True,
+    manualCheck=True,
+    computeFOOOF=False
+):
     from pathlib import Path
     from datetime import datetime
-    import os, json, pickle
+    import os
+    import json
+    import pickle
 
-    label_prob_threshold = json_data['do_label_prob_threshold']
-    threshold_percentile = json_data['do_ica_eigThresh']
-    
-    """
-    print(
-    📚 Riferimento TEP:
-    TMS of the primary motor cortex (M1) evokes several peaks, described
-    at approximately 15 (N15), 30 (P30), 45 (N45), 60 (P60), 100 (N100),
-    and 180 (P180) milliseconds [28,32,35,36]. However, recently it has
-    been shown that later peaks (>~80 ms) such as N100 and P180 may
-    be contaminated by sensory-evoked responses (see Sections 3.5, 4.2.3, and 4.2.4),
-    while very early peaks, such as the N15, can be contaminated by cranial muscle responses (see Section 4.2.2).
-    TEPs are detectable up to 400–500 ms around the stimulation area as well as in distant inter-connected brain areas [4,32,37].
-    
-    Paper:
-    Hernandez-Pavon, J. C., Veniero, D., Bergmann, T. O., Belardinelli, P., Bortoletto, M., Casarotto, S., ... & Ilmoniemi, R. J. (2023). 
-    TMS combined with EEG: Recommendations and open issues for data collection and analysis. Brain stimulation, 16(2), 567-593.
+    label_prob_threshold=float(
+        json_data.get(
+            "do_label_prob_threshold",
+            0.80
+        )
     )
-    """
+
+    threshold_percentile=float(
+        json_data.get(
+            "do_ica_eigThresh",
+            0
+        )
+    )
+
+    autoReject=bool(
+        json_data.get(
+            "do_ica_automaticRej",
+            True
+        )
+    )
     
-    print(f"⚙️ ICA eigThresh = {json_data['do_ica_eigThresh']}, label_prob_threshold = {json_data['do_label_prob_threshold']}")
+    manualCheck=bool(
+        json_data.get(
+            "do_ica_manualCheck",
+            True
+        )
+    )
+    
+    print(
+        f"⚙️ ICA eigThresh={threshold_percentile}, "
+        f"label_prob_threshold={label_prob_threshold}"
+    )
 
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    postica_dir = Path(experiment_dir) / "4.postICA" / timestamp
-    postica_dir.mkdir(parents=True, exist_ok=True)
-    json_data['postICA_dir'] = str(postica_dir)
-    json_data['ICA_timestamp'] = timestamp
+    timestamp=datetime.now().strftime(
+        "%Y%m%d%H%M%S"
+    )
 
-    if isinstance(file, str) and file.endswith('.pkl'):
+    postica_dir=(
+        Path(experiment_dir)
+        /"4.postICA"
+        /timestamp
+    )
+
+    postica_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    json_data["postICA_dir"]=str(
+        postica_dir
+    )
+
+    json_data["ICA_timestamp"]=timestamp
+
+    if isinstance(file,str) and file.endswith(".pkl"):
         if not os.path.isfile(file):
-            raise FileNotFoundError(f"File non trovato: {file}")
-        with open(file, 'rb') as f:
-            detrendedEpochs = pickle.load(f)
-        print(f"[INFO] Oggetto caricato da: {file}")
-    else:
-        detrendedEpochs = file
-        print(f"[INFO] Oggetto passato direttamente")
+            raise FileNotFoundError(
+                f"File non trovato: {file}"
+            )
 
-    postICA_raw, ica_model = run_ica_filtering_v3(
-        detrendedEpochs, json_data, postica_dir, sub,
+        with open(
+            file,
+            "rb"
+        ) as f:
+            detrendedEpochs=pickle.load(f)
+
+        print(
+            f"[INFO] Oggetto caricato da: {file}"
+        )
+
+    else:
+        detrendedEpochs=file
+
+        print(
+            "[INFO] Oggetto passato direttamente"
+        )
+
+    if detrendedEpochs is None:
+        raise ValueError(
+            "ICAprocessing ha ricevuto un oggetto None."
+        )
+
+    if not json_data.get("do_ica",False):
+        print(
+            "⏭️ ICA disattivata: "
+            "restituisco direttamente le epoche detrendate."
+        )
+
+        json_data["ICA_applied"]=False
+        json_data["ICA_components_tot"]=0
+        json_data["ICA_includedComponents_tot"]=0
+        json_data["ICA_excludedComponents"]=[]
+        json_data["ICA_output_type"]="detrendedEpochs_noICA"
+
+        return (
+            detrendedEpochs.copy(),
+            None,
+            json_data
+        )
+
+    postICA_raw,ica_model=run_ica_filtering_v3(
+        detrendedEpochs,
+        json_data,
+        postica_dir,
+        sub,
         autoReject=autoReject,
         manualCheck=manualCheck,
         label_prob_threshold=label_prob_threshold,
@@ -2492,194 +5407,1559 @@ def ICAprocessing(file,
     )
 
     if computeFOOOF:
-        print('Computing postICA raw FOOOF')
-        df = extract_psd_features(postICA_raw, 'postICA_raw', experiment_dir, json_data)
+        print(
+            "Computing ICA-corrected raw FOOOF"
+        )
 
-    json_data['ICA_includedComponents_tot'] = int(ica_model.n_components_ - len(ica_model.exclude))
-    json_data['ICA_components_tot'] = int(ica_model.n_components_)
-    json_data['ICA_excludedComponents'] = [int(x) for x in ica_model.exclude]
+        extract_psd_features(
+            postICA_raw,
+            "ICA_corrected_raw",
+            experiment_dir,
+            json_data
+        )
 
-    postICA_final = postICAsteps(postICA_raw, json_data, experiment_dir, sub)
+    json_data["ICA_applied"]=True
 
+    json_data["ICA_components_tot"]=int(
+        ica_model.n_components_
+    )
+
+    json_data["ICA_excludedComponents"]=[
+        int(component)
+        for component in ica_model.exclude
+    ]
+
+    json_data["ICA_includedComponents_tot"]=int(
+        ica_model.n_components_
+        -len(ica_model.exclude)
+    )
+
+    json_data["ICA_output_type"]="ICA_corrected_epochs"
+
+    pkl_dir=(
+        Path(experiment_dir)
+        /"7.pkls"
+    )
+
+    pkl_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    with open(
+        pkl_dir
+        /f"{timestamp}_{sub}_ICA_corrected_raw.pkl",
+        "wb"
+    ) as f:
+        pickle.dump(
+            postICA_raw,
+            f
+        )
+
+    with open(
+        pkl_dir
+        /f"{timestamp}_{sub}_ica_model.pkl",
+        "wb"
+    ) as f:
+        pickle.dump(
+            ica_model,
+            f
+        )
+
+    json_data_clean=make_json_serializable(
+        json_data
+    )
+
+    with open(
+        Path(experiment_dir)
+        /f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            json_data_clean,
+            json_file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print(
+        f"✅ ICA completata | "
+        f"tot={ica_model.n_components_} | "
+        f"excluded={len(ica_model.exclude)}"
+    )
+
+    return (
+        postICA_raw,
+        ica_model,
+        json_data
+    )
+
+def finalize_tep_epochs(
+    epochs_input,
+    json_data,
+    experiment_dir,
+    sub,
+    computeFOOOF=False,
+    save_gif=True
+):
+    from pathlib import Path
+    from datetime import datetime
+    import json
+    import pickle
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if epochs_input is None:
+        raise ValueError(
+            "finalize_tep_epochs ha ricevuto epochs_input=None."
+        )
+
+    timestamp=json_data.get(
+        "ICA_timestamp"
+    )
+
+    if timestamp is None:
+        timestamp=datetime.now().strftime(
+            "%Y%m%d%H%M%S"
+        )
+
+        json_data["finalization_timestamp"]=timestamp
+
+    final_dir=(
+        Path(experiment_dir)
+        /"4.postICA"
+        /str(timestamp)
+    )
+
+    final_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    json_data["finalization_dir"]=str(
+        final_dir
+    )
+
+    if json_data.get("ICA_applied",False):
+        json_data["finalization_input"]="ICA_corrected_epochs"
+    else:
+        json_data["finalization_input"]="detrendedEpochs_noICA"
+
+    postICA_final=postICAsteps(
+        epochs_input,
+        json_data,
+        experiment_dir,
+        sub
+    )
+
+    data_tmin=float(
+        postICA_final.times.min()
+    )
+
+    data_tmax=float(
+        postICA_final.times.max()
+    )
+
+    plot_tmin=max(
+        float(
+            json_data.get(
+                "epochs_plot_timewindow_min",
+                data_tmin
+            )
+        ),
+        data_tmin
+    )
+
+    plot_tmax=min(
+        float(
+            json_data.get(
+                "epochs_plot_timewindow_max",
+                data_tmax
+            )
+        ),
+        data_tmax
+    )
+
+    if plot_tmin>=plot_tmax:
+        raise ValueError(
+            f"Finestra grafica non valida: "
+            f"[{plot_tmin},{plot_tmax}] s; "
+            f"dati disponibili "
+            f"[{data_tmin},{data_tmax}] s."
+        )
+
+    json_data[
+        "epochs_plot_timewindow_effective"
+    ]=[
+        float(plot_tmin),
+        float(plot_tmax)
+    ]
+
+    print(
+        "📊 Final plot window: "
+        f"{plot_tmin*1000:.1f}–"
+        f"{plot_tmax*1000:.1f} ms"
+    )
 
     basicPlots(
         postICA_final,
         json_data,
         experiment_dir,
         sub,
-        key='postICA_final',
-        subPath=os.path.join('4.postICA', timestamp),
+        key="final",
+        subPath=str(
+            Path("4.postICA")
+            /str(timestamp)
+        ),
         show=False
     )
 
-    condition_number_evoked = compute_condition_number_epochs_average(postICA_final)
-    json_data['cn_postICA_final'] = float(condition_number_evoked)
+    if save_gif:
+        try:
+            gif_path,json_data=(
+                create_butterfly_topomap_gif(
+                    epochs=postICA_final,
+                    json_data=json_data,
+                    experiment_dir=experiment_dir,
+                    sub=sub,
+                    saveNote="final",
+                    subPath=str(
+                        Path("4.postICA")
+                        /str(timestamp)
+                    ),
+                    tmin=plot_tmin,
+                    tmax=plot_tmax,
+                    step=float(
+                        json_data.get(
+                            "postICA_gif_step_s",
+                            0.002
+                        )
+                    ),
+                    xlim=(
+                        plot_tmin,
+                        plot_tmax
+                    ),
+                    vlim=tuple(
+                        json_data.get(
+                            "postICA_gif_vlim_V",
+                            (-5e-6,5e-6)
+                        )
+                    ),
+                    sphere=float(
+                        json_data.get(
+                            "postICA_gif_sphere_m",
+                            0.095
+                        )
+                    ),
+                    duration=int(
+                        json_data.get(
+                            "postICA_gif_duration_ms",
+                            50
+                        )
+                    ),
+                    transparency=bool(
+                        json_data.get(
+                            "postICA_gif_transparency",
+                            False
+                        )
+                    ),
+                    save_static=True
+                )
+            )
 
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-        json.dump(json_data_clean, json_file, indent=4, sort_keys=True)
+            json_data["final_gif"]=str(
+                gif_path
+            )
 
-    with open(Path(experiment_dir) / '6.pkls' / f'{timestamp}_{sub}_postICA_raw.pkl', 'wb') as f:
-        pickle.dump(postICA_raw, f)
+            json_data["final_gif_tmin_s"]=float(
+                plot_tmin
+            )
 
-    with open(Path(experiment_dir) / '6.pkls' / f'{timestamp}_{sub}_postICA_final.pkl', 'wb') as f:
-        pickle.dump(postICA_final, f)
+            json_data["final_gif_tmax_s"]=float(
+                plot_tmax
+            )
 
-    plot_topomap(
-        postICA_final,
-        json_data, experiment_dir, sub,
-        subDir=os.path.join('4.postICA', timestamp),
-        saveNote='postICA'
+            json_data.pop(
+                "final_gif_error",
+                None
+            )
+
+            print(
+                f"✅ Final butterfly-topomap GIF: "
+                f"{gif_path}"
+            )
+
+        except Exception as error:
+            json_data["final_gif"]=None
+            json_data["final_gif_error"]=str(
+                error
+            )
+
+            print(
+                "⚠️ Impossibile generare la GIF:",
+                error
+            )
+
+    condition_number_evoked=(
+        compute_condition_number_epochs_average(
+            postICA_final
+        )
     )
 
-    json_data['feats_smfp'] = plot_gmfp(
+    json_data["cn_final"]=float(
+        condition_number_evoked
+    )
+
+    plot_topomap(
         postICA_final,
         json_data,
         experiment_dir,
         sub,
-        FEAT=json_data['seedChans']
+        subDir=str(
+            Path("4.postICA")
+            /str(timestamp)
+        ),
+        saveNote="final"
     )
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(postICA_final.times * 1e3, np.mean(postICA_final.get_data(), axis=0).T * 1e6, c='k', linewidth=0.2)
-    plt.xlabel('Time (ms)')
-    plt.ylabel('Amplitude (µV)')
-    plt.xlim(-100, 400)
-    plt.grid(False)
-    plt.savefig(postica_dir / 'tep_comparison.png')
-    plt.close()
+    json_data["feats_smfp"]=plot_gmfp(
+        postICA_final,
+        json_data,
+        experiment_dir,
+        sub,
+        FEAT=json_data["seedChans"]
+    )
+
+    fig,ax=plt.subplots(
+        figsize=(10,5)
+    )
+
+    ax.plot(
+        postICA_final.times*1e3,
+        np.mean(
+            postICA_final.get_data(),
+            axis=0
+        ).T*1e6,
+        color="k",
+        linewidth=0.2
+    )
+
+    ax.axvline(
+        0,
+        color="k",
+        linestyle="--",
+        linewidth=1
+    )
+
+    ax.set_xlabel(
+        "Time [ms]"
+    )
+
+    ax.set_ylabel(
+        "Amplitude [µV]"
+    )
+
+    ax.set_xlim(
+        plot_tmin*1000,
+        plot_tmax*1000
+    )
+
+    ax.grid(
+        False
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        final_dir/"tep_final_comparison.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
 
     if computeFOOOF:
-        print('Computing postICA final FOOOF')
-        df = extract_psd_features(postICA_final, 'postICA_final', experiment_dir, json_data)
+        print(
+            "Computing final FOOOF"
+        )
 
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-        json.dump(json_data_clean, json_file, indent=4, sort_keys=True)
+        extract_psd_features(
+            postICA_final,
+            "final",
+            experiment_dir,
+            json_data
+        )
 
-    return postICA_final, json_data
-    
+    pkl_dir=(
+        Path(experiment_dir)
+        /"7.pkls"
+    )
 
-def ICAprocessing_old_20260416(file,
-                  json_data, experiment_dir, sub,
-                    autoReject=True,
-                    manualCheck=True, 
-                    computeFOOOF=False
-      
-                 ):
-    
-    #autoReject=json_data['do_ica_automaticRej'],
-    label_prob_threshold=json_data['do_label_prob_threshold'],
-    threshold_percentile=json_data['do_ica_eigThresh'],
-    
-    # Stampa del riferimento scientifico sui TEP
-    print("""
-    📚 Riferimento TEP:
-    TMS of the primary motor cortex (M1) evokes several peaks, described
-    at approximately 15 (N15), 30 (P30), 45 (N45), 60 (P60), 100 (N100),
-    and 180 (P180) milliseconds [28,32,35,36]. However, recently it has
-    been shown that later peaks (>~80 ms) such as N100 and P180 may
-    be contaminated by sensory-evoked responses (see Sections 3.5, 4.2.3, and 4.2.4),
-    while very early peaks, such as the N15, can be contaminated by cranial muscle responses (see Section 4.2.2).
-    TEPs are detectable up to 400–500 ms around the stimulation area as well as in distant inter-connected brain areas [4,32,37].
-    
-    Link (materiale di riferimento): https://drive.google.com/drive/folders/1jqUiGEBVzhRdN7iISeIFFDoSeJvb4YqM
-    Paper:
-    Hernandez-Pavon, J. C., Veniero, D., Bergmann, T. O., Belardinelli, P., Bortoletto, M., Casarotto, S., ... & Ilmoniemi, R. J. (2023). 
-    TMS combined with EEG: Recommendations and open issues for data collection and analysis. Brain stimulation, 16(2), 567-593.
-    """)
-    
-    # Log dei parametri di ICA
-    print(f"⚙️ ICA eigThresh = {json_data['do_ica_eigThresh']}, label_prob_threshold = {json_data['do_label_prob_threshold']}")
+    pkl_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
+    final_pkl_path=(
+        pkl_dir
+        /f"{timestamp}_{sub}_final.pkl"
+    )
 
-    if isinstance(file, str) and file.endswith('.pkl'):
-        if not os.path.isfile(file):
-            raise FileNotFoundError(f"File non trovato: {file}")
-        with open(file, 'rb') as f:
-            detrendedEpochs = pickle.load(f)
-        print(f"[INFO] Oggetto caricato da: {file}")
-    else:
-        detrendedEpochs = file
-        print(f"[INFO] Oggetto passato direttamente")
+    with open(
+        final_pkl_path,
+        "wb"
+    ) as f:
+        pickle.dump(
+            postICA_final,
+            f
+        )
 
+    json_data["final_epochs_pkl"]=str(
+        final_pkl_path
+    )
 
-    ######################################################################################    
-    postICA_raw, ica_model = run_ica_filtering_v3(detrendedEpochs, json_data, experiment_dir, sub,
-                                                  autoReject=autoReject,
-                                                  manualCheck=manualCheck, #json_data['do_ica_manualCheck'], 
-                                                  label_prob_threshold=json_data['do_label_prob_threshold'],
-                                                  threshold_percentile=json_data['do_ica_eigThresh'])
-    if computeFOOOF:
-        print('Computing postICA raw FOOOF')
-        df = extract_psd_features(postICA_raw, 'postICA_raw', experiment_dir, json_data)
-        
-    with open(f'{experiment_dir}\\6.pkls\\{sub}_postICA_raw.pkl', 'wb') as f:
-        pickle.dump(postICA_raw, f)
-        
-    json_data['ICA_includedComponents_tot'] = ica_model.n_components_ - len(ica_model.exclude)
-    json_data['ICA_components_tot'] = ica_model.n_components_
-    json_data['ICA_excludedComponents'] = ica_model.exclude
+    json_data["final_epochs_type"]=(
+        "postICA_final"
+        if json_data.get(
+            "ICA_applied",
+            False
+        )
+        else "final_noICA"
+    )
 
-    #####################################################################################
-    # filtering in narrow band 
-    # resampling to raw sr
-    # bad chans interpolations
-    postICA_final = postICAsteps(postICA_raw, json_data, experiment_dir, sub)
-    basicPlots(postICA_final, json_data, experiment_dir, sub, key='postICA_final', subPath='4.postICA', show=False)
-    condition_number_evoked = compute_condition_number_epochs_average(postICA_final)
-    json_data['cn_postICA_final'] = condition_number_evoked
-    # Salva parametri
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data, json_file, indent=4, sort_keys=True)
-        
-    with open(f'{experiment_dir}\\6.pkls\\{sub}_postICA_final.pkl', 'wb') as f:
-        pickle.dump(postICA_final, f)
+    json_data["finalization_completed"]=True
 
-    #####################################################################################
-    do_run=False
-    if do_run:
-        postICA_final.plot();
+    json_data_clean=make_json_serializable(
+        json_data
+    )
 
-    do_run=True
-    if do_run:
-        plot_topomap(postICA_final, 
-                     json_data, experiment_dir, sub,
-                     subDir='4.postICA', saveNote=f'postICA')
-        json_data['feats_smfp'] = plot_gmfp(postICA_final, json_data, experiment_dir, sub, FEAT=json_data['seedChans'])
+    with open(
+        Path(experiment_dir)
+        /f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            json_data_clean,
+            json_file,
+            indent=4,
+            sort_keys=True
+        )
 
-    do_run=True
-    if do_run:
-        plt.figure(figsize=(10, 5))
-        plt.plot(postICA_final.times*1e3, np.mean(postICA_final.get_data(), axis=0).T*1e6, c='k', linewidth=0.2)
-        #plt.axvline(x=0+10, c='r', linestyle='--', label='stim')
-        plt.xlabel('Time (ms)')
-        plt.ylabel('Amplitude (muV)')
-        plt.xlim(-100, 400)
-        plt.grid(False)
-        plt.savefig(f'{experiment_dir}\\5.final\\tep_comparison.png')
-        plt.close()
-    
-    #plot_ersp(postICA_final, channel=json_data['seedChans'], subDir='4.postICA', saveNote='postICA')
-    #####################################################################################
-    if computeFOOOF:
-        print('Computing postICA final FOOOF')
-        df = extract_psd_features(postICA_final, 'postICA_final', experiment_dir, json_data)
+    print(
+        "✅ Finalizzazione TEP completata | "
+        f"ICA applied={json_data.get('ICA_applied',False)}"
+    )
 
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data, json_file, indent=4, sort_keys=True)
-        
-    return postICA_final, json_data
+    return (
+        postICA_final,
+        json_data
+    )
 
 
+def compute_tep_natural_frequency(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+    save=True
+):
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    from mne.time_frequency import tfr_array_morlet
+
+    sub=str(sub).strip()
+
+    out_dir=(
+        Path(experiment_dir)
+        /"5.Extra"
+        /"FE"
+        /"NaturalFrequency"
+    )
+
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    seed_channels=[
+        channel
+        for channel in json_data.get(
+            "seedChans",
+            []
+        )
+        if channel in postICA_final.ch_names
+    ]
+
+    if not seed_channels:
+        raise ValueError(
+            "Nessun seed channel valido per la Natural Frequency."
+        )
+
+    epochs=(
+        postICA_final
+        .copy()
+        .pick(seed_channels)
+    )
+
+    data=np.asarray(
+        epochs.get_data(),
+        dtype=float
+    )
+
+    times_ms=np.asarray(
+        epochs.times,
+        dtype=float
+    )*1000.0
+
+    sfreq=float(
+        epochs.info["sfreq"]
+    )
+
+    n_times=int(
+        data.shape[-1]
+    )
+
+    fmin=float(
+        json_data.get(
+            "tep_nf_fmin",
+            8.0
+        )
+    )
+
+    fmax=float(
+        json_data.get(
+            "tep_nf_fmax",
+            45.0
+        )
+    )
+
+    frequency_step_hz=float(
+        json_data.get(
+            "tep_nf_frequency_step_hz",
+            1.0
+        )
+    )
+
+    morlet_cycles=float(
+        json_data.get(
+            "tep_nf_n_cycles",
+            3.5
+        )
+    )
+
+    if fmin<=0:
+        raise ValueError(
+            f"tep_nf_fmin deve essere > 0: {fmin}"
+        )
+
+    if fmax<=fmin:
+        raise ValueError(
+            "Intervallo Natural Frequency non valido: "
+            f"fmin={fmin}, fmax={fmax} Hz."
+        )
+
+    if frequency_step_hz<=0:
+        raise ValueError(
+            "tep_nf_frequency_step_hz deve essere > 0."
+        )
+
+    if morlet_cycles<=0:
+        raise ValueError(
+            "tep_nf_n_cycles deve essere > 0."
+        )
+
+    nyquist=sfreq/2.0
+
+    effective_fmax=min(
+        fmax,
+        np.nextafter(
+            nyquist,
+            0.0
+        )
+    )
+
+    freqs=np.arange(
+        fmin,
+        effective_fmax
+        +frequency_step_hz*0.5,
+        frequency_step_hz,
+        dtype=float
+    )
+
+    freqs=freqs[
+        freqs<nyquist
+    ]
+
+    if len(freqs)<2:
+        raise ValueError(
+            "Intervallo di frequenze insufficiente: "
+            f"fmin={fmin}, fmax={fmax}, "
+            f"step={frequency_step_hz}, "
+            f"Nyquist={nyquist:.3f} Hz."
+        )
+
+    n_cycles=np.full(
+        freqs.shape,
+        morlet_cycles,
+        dtype=float
+    )
+
+    baseline_window_ms=tuple(
+        json_data.get(
+            "tep_nf_baseline_window_ms",
+            (-300,-50)
+        )
+    )
+
+    response_window_ms=tuple(
+        json_data.get(
+            "tep_nf_response_window_ms",
+            (20,200)
+        )
+    )
+
+    if len(baseline_window_ms)!=2:
+        raise ValueError(
+            "tep_nf_baseline_window_ms deve contenere "
+            "esattamente due valori."
+        )
+
+    if len(response_window_ms)!=2:
+        raise ValueError(
+            "tep_nf_response_window_ms deve contenere "
+            "esattamente due valori."
+        )
+
+    baseline_start_ms=float(
+        baseline_window_ms[0]
+    )
+
+    baseline_end_ms=float(
+        baseline_window_ms[1]
+    )
+
+    response_start_ms=float(
+        response_window_ms[0]
+    )
+
+    response_end_ms=float(
+        response_window_ms[1]
+    )
+
+    if baseline_start_ms>=baseline_end_ms:
+        raise ValueError(
+            "Finestra baseline Natural Frequency non valida: "
+            f"{baseline_window_ms} ms."
+        )
+
+    if response_start_ms>=response_end_ms:
+        raise ValueError(
+            "Finestra di risposta Natural Frequency non valida: "
+            f"{response_window_ms} ms."
+        )
+
+    data_min_ms=float(
+        times_ms.min()
+    )
+
+    data_max_ms=float(
+        times_ms.max()
+    )
+
+    if (
+        baseline_start_ms<data_min_ms
+        or baseline_end_ms>data_max_ms
+    ):
+        raise ValueError(
+            "Finestra baseline Natural Frequency non contenuta "
+            "nelle epoche: dati "
+            f"[{data_min_ms:.3f},{data_max_ms:.3f}] ms, "
+            f"richiesta [{baseline_start_ms},"
+            f"{baseline_end_ms}] ms."
+        )
+
+    if (
+        response_start_ms<data_min_ms
+        or response_end_ms>data_max_ms
+    ):
+        raise ValueError(
+            "Finestra post-TMS Natural Frequency non contenuta "
+            "nelle epoche: dati "
+            f"[{data_min_ms:.3f},{data_max_ms:.3f}] ms, "
+            f"richiesta [{response_start_ms},"
+            f"{response_end_ms}] ms."
+        )
+
+    baseline_mask=(
+        (times_ms>=baseline_start_ms)
+        &(times_ms<=baseline_end_ms)
+    )
+
+    response_mask=(
+        (times_ms>=response_start_ms)
+        &(times_ms<=response_end_ms)
+    )
+
+    if np.sum(baseline_mask)<3:
+        raise ValueError(
+            "La finestra baseline non contiene abbastanza campioni: "
+            f"{baseline_window_ms} ms."
+        )
+
+    if np.sum(response_mask)<3:
+        raise ValueError(
+            "La finestra post-TMS non contiene abbastanza campioni: "
+            f"{response_window_ms} ms."
+        )
+
+    baseline_duration_ms=float(
+        baseline_end_ms
+        -baseline_start_ms
+    )
+
+    minimum_frequency_period_ms=float(
+        1000.0/freqs.min()
+    )
+
+    baseline_cycles_at_fmin=float(
+        baseline_duration_ms
+        /minimum_frequency_period_ms
+    )
+
+    nominal_wavelet_duration_sec=float(
+        morlet_cycles/freqs.min()
+    )
+
+    wavelet_duration_sec=float(
+        10.0
+        *np.max(n_cycles)
+        /(2.0*np.pi*np.min(freqs))
+    )
+
+    wavelet_samples=int(
+        np.ceil(
+            wavelet_duration_sec
+            *sfreq
+        )
+    )
+
+    minimum_total_samples=max(
+        wavelet_samples+2,
+        n_times
+    )
+
+    minimum_padding_seconds=float(
+        json_data.get(
+            "tep_nf_min_padding_s",
+            0.25
+        )
+    )
+
+    pad_samples=max(
+        int(
+            np.ceil(
+                (
+                    minimum_total_samples
+                    -n_times
+                )/2.0
+            )
+        ),
+        int(
+            np.ceil(
+                minimum_padding_seconds
+                *sfreq
+            )
+        )
+    )
+
+    padding_mode=(
+        "reflect"
+        if n_times>1
+        else "edge"
+    )
+
+    data_padded=np.pad(
+        data,
+        (
+            (0,0),
+            (0,0),
+            (
+                pad_samples,
+                pad_samples
+            )
+        ),
+        mode=padding_mode
+    )
+
+    print(
+        "🔧 Rosanova Morlet ERSP: "
+        f"trials={data.shape[0]}, "
+        f"channels={data.shape[1]}, "
+        f"frequencies={freqs[0]:.1f}–"
+        f"{freqs[-1]:.1f} Hz, "
+        f"step={frequency_step_hz:.2f} Hz, "
+        f"cycles={morlet_cycles:.2f}"
+    )
+
+    print(
+        "   Baseline:",
+        f"{baseline_start_ms:.1f}–"
+        f"{baseline_end_ms:.1f} ms",
+        f"| duration={baseline_duration_ms:.1f} ms",
+        f"| periods at {freqs.min():.1f} Hz="
+        f"{baseline_cycles_at_fmin:.2f}"
+    )
+
+    print(
+        "   Nominal wavelet duration at "
+        f"{freqs.min():.1f} Hz: "
+        f"{nominal_wavelet_duration_sec*1000:.1f} ms"
+    )
+
+    print(
+        "   Signal samples:",
+        n_times,
+        "| padded samples:",
+        data_padded.shape[-1],
+        "| padding per side:",
+        pad_samples
+    )
+
+    power_padded=tfr_array_morlet(
+        data_padded,
+        sfreq=sfreq,
+        freqs=freqs,
+        n_cycles=n_cycles,
+        output="power",
+        use_fft=True,
+        zero_mean=True,
+        decim=1,
+        n_jobs=1,
+        verbose=False
+    )
+
+    power=np.asarray(
+        power_padded[
+            ...,
+            pad_samples:pad_samples+n_times
+        ],
+        dtype=float
+    )
+
+    if power.ndim!=4:
+        raise RuntimeError(
+            f"Shape Morlet inattesa: {power.shape}"
+        )
+
+    if power.shape[-1]!=len(times_ms):
+        raise RuntimeError(
+            "Numero di campioni TFR non coerente con i tempi: "
+            f"{power.shape[-1]} vs {len(times_ms)}."
+        )
+
+    epsilon=np.finfo(float).eps
+
+    baseline_power=np.mean(
+        power[
+            ...,
+            baseline_mask
+        ],
+        axis=-1,
+        keepdims=True
+    )
+
+    baseline_power=np.maximum(
+        baseline_power,
+        epsilon
+    )
+
+    ersp_db=10.0*np.log10(
+        np.maximum(
+            power,
+            epsilon
+        )
+        /baseline_power
+    )
+
+    roi_ersp_db=np.mean(
+        ersp_db,
+        axis=(0,1)
+    )
+
+    response_ersp=roi_ersp_db[
+        :,
+        response_mask
+    ]
+
+    cumulative_ersp=np.sum(
+        response_ersp,
+        axis=1
+    )
+
+    cumulative_positive_ersp=np.sum(
+        np.maximum(
+            response_ersp,
+            0.0
+        ),
+        axis=1
+    )
+
+    if not np.any(
+        np.isfinite(
+            cumulative_positive_ersp
+        )
+    ):
+        raise RuntimeError(
+            "Lo spettro cumulativo Natural Frequency "
+            "non contiene valori finiti."
+        )
+
+    nf_index=int(
+        np.nanargmax(
+            cumulative_positive_ersp
+        )
+    )
+
+    natural_frequency_hz=float(
+        freqs[nf_index]
+    )
+
+    natural_frequency_score=float(
+        cumulative_positive_ersp[
+            nf_index
+        ]
+    )
+
+    response_mean_ersp=np.mean(
+        response_ersp,
+        axis=1
+    )
+
+    boundary_frequency=bool(
+        nf_index==0
+        or nf_index==len(freqs)-1
+    )
+
+    band_definitions={
+        "theta":(4.0,7.0),
+        "alpha":(8.0,12.0),
+        "beta1":(13.0,20.0),
+        "beta2":(21.0,29.0),
+        "gamma":(30.0,50.0)
+    }
+
+    band_power={}
+
+    for (
+        band_name,
+        (
+            band_min,
+            band_max
+        )
+    ) in band_definitions.items():
+
+        band_mask=(
+            (freqs>=band_min)
+            &(freqs<=band_max)
+        )
+
+        if np.any(band_mask):
+            band_power[
+                band_name
+            ]=float(
+                np.mean(
+                    response_mean_ersp[
+                        band_mask
+                    ]
+                )
+            )
+        else:
+            band_power[
+                band_name
+            ]=float("nan")
+
+    evoked_roi_uv=(
+        epochs
+        .average()
+        .get_data()
+        .mean(axis=0)
+        *1e6
+    )
+
+    tfr_csv=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_morlet_tfr.csv"
+    )
+
+    spectrum_csv=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_spectrum.csv"
+    )
+
+    summary_json=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_summary.json"
+    )
+
+    rosanova_png=(
+        out_dir
+        /f"{sub}_TEP_natural_frequency_rosanova.png"
+    )
+
+    pd.DataFrame(
+        roi_ersp_db,
+        index=freqs,
+        columns=np.round(
+            times_ms,
+            3
+        )
+    ).rename_axis(
+        "frequency_hz"
+    ).to_csv(
+        tfr_csv
+    )
+
+    pd.DataFrame({
+        "frequency_hz":freqs,
+        "mean_response_ersp_db":response_mean_ersp,
+        "cumulative_ersp":cumulative_ersp,
+        "cumulative_positive_ersp":cumulative_positive_ersp,
+        "is_natural_frequency":(
+            np.arange(len(freqs))
+            ==nf_index
+        )
+    }).to_csv(
+        spectrum_csv,
+        index=False
+    )
+
+    reference={
+        "citation":(
+            "Rosanova M, Casali A, Bellina V, Resta F, "
+            "Mariotti M, Massimini M. Natural Frequencies "
+            "of Human Corticothalamic Circuits. "
+            "Journal of Neuroscience. 2009;29:7679-7685."
+        ),
+        "doi":"10.1523/JNEUROSCI.0445-09.2009"
+    }
+
+    summary={
+        "subject":sub,
+        "subject_id":sub,
+        "method":"Rosanova-style Morlet ERSP",
+        "natural_frequency_hz":natural_frequency_hz,
+        "natural_frequency_score":natural_frequency_score,
+        "natural_frequency_at_boundary":boundary_frequency,
+        "seed_channels":seed_channels,
+        "requested_frequency_range_hz":[
+            float(fmin),
+            float(fmax)
+        ],
+        "effective_frequency_range_hz":[
+            float(freqs.min()),
+            float(freqs.max())
+        ],
+        "frequencies_hz":freqs.tolist(),
+        "frequency_step_hz":float(
+            frequency_step_hz
+        ),
+        "morlet_cycles":float(
+            morlet_cycles
+        ),
+        "nominal_wavelet_duration_at_fmin_ms":float(
+            nominal_wavelet_duration_sec
+            *1000.0
+        ),
+        "padding_mode":padding_mode,
+        "padding_samples_per_side":int(
+            pad_samples
+        ),
+        "baseline_window_ms":[
+            baseline_start_ms,
+            baseline_end_ms
+        ],
+        "baseline_duration_ms":baseline_duration_ms,
+        "baseline_periods_at_fmin":baseline_cycles_at_fmin,
+        "response_window_ms":[
+            response_start_ms,
+            response_end_ms
+        ],
+        "baseline_correction":(
+            "10*log10(power/baseline_power)"
+        ),
+        "nf_selection":(
+            "Maximum cumulative positive ERSP "
+            "within the response window"
+        ),
+        "band_power_db":band_power,
+        "reference":reference
+    }
+
+    with open(
+        summary_json,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            summary,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    if save:
+        fig=plt.figure(
+            figsize=(13,8),
+            constrained_layout=True
+        )
+
+        grid=fig.add_gridspec(
+            nrows=2,
+            ncols=3,
+            height_ratios=[
+                1.0,
+                2.0
+            ],
+            width_ratios=[
+                6.5,
+                1.3,
+                0.22
+            ],
+            hspace=0.12,
+            wspace=0.08
+        )
+
+        ax_wave=fig.add_subplot(
+            grid[0,0]
+        )
+
+        ax_tf=fig.add_subplot(
+            grid[1,0],
+            sharex=ax_wave
+        )
+
+        ax_spectrum=fig.add_subplot(
+            grid[1,1],
+            sharey=ax_tf
+        )
+
+        ax_cbar=fig.add_subplot(
+            grid[1,2]
+        )
+
+        time_limits=(
+            float(times_ms.min()),
+            float(times_ms.max())
+        )
+
+        ax_wave.plot(
+            times_ms,
+            evoked_roi_uv,
+            linewidth=2
+        )
+
+        ax_wave.axvline(
+            0,
+            color="k",
+            linestyle=":",
+            linewidth=2
+        )
+
+        ax_wave.axvspan(
+            response_start_ms,
+            response_end_ms,
+            alpha=0.12
+        )
+
+        ax_wave.set_xlim(
+            time_limits
+        )
+
+        ax_wave.set_ylabel(
+            "Amplitude [µV]"
+        )
+
+        ax_wave.set_title(
+            f"{sub} Seed evoked waveform | "
+            f"Seed={', '.join(seed_channels)}"
+        )
+
+        ax_wave.set_xlabel("")
+
+        ax_wave.tick_params(
+            axis="x",
+            labelbottom=False
+        )
+
+        ax_wave.grid(False)
+
+        vmax=float(
+            np.nanpercentile(
+                np.abs(
+                    roi_ersp_db
+                ),
+                98
+            )
+        )
+
+        if (
+            not np.isfinite(vmax)
+            or vmax<=0
+        ):
+            vmax=1.0
+
+        vmin=-vmax
+
+        image=ax_tf.pcolormesh(
+            times_ms,
+            freqs,
+            roi_ersp_db,
+            shading="gouraud",
+            cmap="jet",
+            vmin=vmin,
+            vmax=vmax
+        )
+
+        ax_tf.axvline(
+            0,
+            color="k",
+            linestyle=":",
+            linewidth=2
+        )
+
+        ax_tf.axhline(
+            natural_frequency_hz,
+            color="k",
+            linestyle=":",
+            linewidth=1.5
+        )
+
+        ax_tf.text(
+            times_ms.max()-5,
+            natural_frequency_hz
+            +frequency_step_hz*0.8,
+            f"{natural_frequency_hz:.1f} Hz",
+            ha="right",
+            va="bottom",
+            fontsize=13,
+            fontweight="bold"
+        )
+
+        ax_tf.set_xlim(
+            time_limits
+        )
+
+        ax_tf.set_ylim(
+            float(freqs.min()),
+            float(freqs.max())
+        )
+
+        ax_tf.set_xlabel(
+            "Time [ms]"
+        )
+
+        ax_tf.set_ylabel(
+            "Frequency [Hz]"
+        )
+
+        ax_tf.set_title(
+            f"{sub} Morlet ERSP"
+        )
+
+        ax_tf.grid(False)
+
+        ax_spectrum.plot(
+            cumulative_positive_ersp,
+            freqs,
+            color="black",
+            linewidth=2
+        )
+
+        ax_spectrum.fill_betweenx(
+            freqs,
+            0,
+            cumulative_positive_ersp,
+            color="0.85"
+        )
+
+        ax_spectrum.axhline(
+            natural_frequency_hz,
+            color="k",
+            linestyle=":",
+            linewidth=1.5
+        )
+
+        ax_spectrum.set_xlabel(
+            "Cumulative positive ERSP"
+        )
+
+        ax_spectrum.tick_params(
+            axis="y",
+            labelleft=False
+        )
+
+        ax_spectrum.grid(False)
+
+        xmax=float(
+            np.nanmax(
+                cumulative_positive_ersp
+            )
+        )
+
+        if (
+            not np.isfinite(xmax)
+            or xmax<=0
+        ):
+            xmax=1.0
+
+        band_labels=[
+            ("θ",4.0,7.0),
+            ("α",8.0,12.0),
+            ("β1",13.0,20.0),
+            ("β2",21.0,29.0),
+            ("γ",30.0,50.0)
+        ]
+
+        for (
+            label,
+            band_min,
+            band_max
+        ) in band_labels:
+
+            visible_min=max(
+                band_min,
+                float(freqs.min())
+            )
+
+            visible_max=min(
+                band_max,
+                float(freqs.max())
+            )
+
+            if visible_min<=visible_max:
+                band_center=(
+                    visible_min
+                    +visible_max
+                )/2.0
+
+                ax_spectrum.text(
+                    xmax*0.93,
+                    band_center,
+                    label,
+                    ha="right",
+                    va="center",
+                    fontsize=11
+                )
+
+            if (
+                band_min>=freqs.min()
+                and band_min<=freqs.max()
+            ):
+                ax_spectrum.axhline(
+                    band_min,
+                    color="0.7",
+                    linewidth=0.6
+                )
+
+        colorbar=fig.colorbar(
+            image,
+            cax=ax_cbar
+        )
+
+        colorbar.set_label(
+            "ERSP [dB]"
+        )
+
+        fig.savefig(
+            rosanova_png,
+            dpi=300,
+            bbox_inches="tight",
+            facecolor="white"
+        )
+
+        plt.close(fig)
+
+    json_data[
+        "TEP_natural_frequency_computed"
+    ]=True
+
+    json_data[
+        "TEP_natural_frequency_method"
+    ]="Rosanova-style Morlet ERSP"
+
+    json_data[
+        "TEP_natural_frequency_hz"
+    ]=natural_frequency_hz
+
+    json_data[
+        "TEP_natural_frequency_score"
+    ]=natural_frequency_score
+
+    json_data[
+        "TEP_natural_frequency_power_db"
+    ]=natural_frequency_score
+
+    json_data[
+        "TEP_natural_frequency_at_boundary"
+    ]=boundary_frequency
+
+    json_data[
+        "TEP_natural_frequency_seed_channels"
+    ]=seed_channels
+
+    json_data[
+        "TEP_natural_frequency_band_power"
+    ]=band_power
+
+    json_data[
+        "TEP_natural_frequency_parameters"
+    ]={
+        "requested_fmin_hz":float(
+            fmin
+        ),
+        "requested_fmax_hz":float(
+            fmax
+        ),
+        "effective_fmin_hz":float(
+            freqs.min()
+        ),
+        "effective_fmax_hz":float(
+            freqs.max()
+        ),
+        "frequency_step_hz":float(
+            frequency_step_hz
+        ),
+        "morlet_cycles":float(
+            morlet_cycles
+        ),
+        "nominal_wavelet_duration_at_fmin_ms":float(
+            nominal_wavelet_duration_sec
+            *1000.0
+        ),
+        "padding_mode":padding_mode,
+        "padding_samples_per_side":int(
+            pad_samples
+        ),
+        "baseline_window_ms":[
+            baseline_start_ms,
+            baseline_end_ms
+        ],
+        "baseline_duration_ms":float(
+            baseline_duration_ms
+        ),
+        "baseline_periods_at_fmin":float(
+            baseline_cycles_at_fmin
+        ),
+        "response_window_ms":[
+            response_start_ms,
+            response_end_ms
+        ]
+    }
+
+    json_data[
+        "TEP_natural_frequency_output_dir"
+    ]=str(out_dir)
+
+    json_data[
+        "TEP_natural_frequency_figure"
+    ]=str(rosanova_png)
+
+    json_data[
+        "TEP_natural_frequency_tfr_csv"
+    ]=str(tfr_csv)
+
+    json_data[
+        "TEP_natural_frequency_spectrum_csv"
+    ]=str(spectrum_csv)
+
+    json_data[
+        "TEP_natural_frequency_summary_json"
+    ]=str(summary_json)
+
+    json_data[
+        "TEP_natural_frequency_reference"
+    ]=reference
+
+    json_data[
+        "TEP_natural_frequency_primary_DOI"
+    ]=reference["doi"]
+
+    results={
+        "natural_frequency_hz":natural_frequency_hz,
+        "natural_frequency_power_db":natural_frequency_score,
+        "natural_frequency_score":natural_frequency_score,
+        "natural_frequency_at_boundary":boundary_frequency,
+        "band_power_db":band_power,
+        "seed_channels":seed_channels,
+        "method":"Rosanova-style Morlet ERSP",
+        "figure":str(rosanova_png),
+        "tfr_csv":str(tfr_csv),
+        "spectrum_csv":str(spectrum_csv),
+        "summary_json":str(summary_json),
+        "output_directory":str(out_dir)
+    }
+
+    print(
+        "✅ TEP Natural Frequency Rosanova completata"
+    )
+
+    print(
+        f"   Seed channels: {seed_channels}"
+    )
+
+    print(
+        f"   Morlet: {morlet_cycles:.2f} cycles, "
+        f"{freqs.min():.1f}–"
+        f"{freqs.max():.1f} Hz, "
+        f"step {frequency_step_hz:.2f} Hz"
+    )
+
+    print(
+        f"   Baseline: "
+        f"{baseline_start_ms:.1f}–"
+        f"{baseline_end_ms:.1f} ms "
+        f"({baseline_cycles_at_fmin:.2f} periods "
+        f"at {freqs.min():.1f} Hz)"
+    )
+
+    print(
+        f"   Response: "
+        f"{response_start_ms:.1f}–"
+        f"{response_end_ms:.1f} ms"
+    )
+
+    print(
+        f"   Padding: {pad_samples} samples "
+        f"per side ({padding_mode})"
+    )
+
+    print(
+        f"   Natural Frequency: "
+        f"{natural_frequency_hz:.1f} Hz"
+    )
+
+    if boundary_frequency:
+        print(
+            "⚠️ La Natural Frequency coincide con un limite "
+            "dell'intervallo spettrale. Interpretare con cautela."
+        )
+
+    print(
+        f"   Figure: {rosanova_png}"
+    )
+
+    return results,json_data
 
 def extractFeatures(
     postICA_final,
     json_data,
     experiment_dir,
-    sub,
+    sub
 ):
     import json
     import pandas as pd
@@ -2691,21 +6971,21 @@ def extractFeatures(
             True
         )
     )
-    
+
     compute_pcist_feature=bool(
         json_data.get(
             "do_pcist",
             False
         )
     )
-    
+
     compute_fooof=bool(
         json_data.get(
             "do_fooof_features",
             False
         )
     )
-    
+
     compute_tep_fingerprint_feature=bool(
         json_data.get(
             "do_tep_fingerprint",
@@ -2713,14 +6993,26 @@ def extractFeatures(
         )
     )
 
-    
-    sub=str(sub).strip()
+    compute_tep_natural_frequency_feature=bool(
+        json_data.get(
+            "do_tep_natural_frequency",
+            False
+        )
+    )
+
+    sub=str(
+        sub
+    ).strip()
 
     json_data["subject"]=sub
     json_data["subject_id"]=sub
 
+    experiment_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
     fe_dir=(
-        Path(experiment_dir)
+        experiment_dir
         /"5.Extra"
         /"FE"
     )
@@ -2733,7 +7025,9 @@ def extractFeatures(
     results={
         "subject":sub,
         "subject_id":sub,
-        "feature_directory":str(fe_dir)
+        "feature_directory":str(
+            fe_dir
+        )
     }
 
     if compute_standard:
@@ -2742,38 +7036,25 @@ def extractFeatures(
             "standard post-ICA features"
         )
 
-        json_data=computeFeatExtraction_v2(
+        scalar_metrics,json_data=computeFeatExtraction_v2(
             postICA_final,
             json_data,
             experiment_dir,
             sub
         )
 
-        keys=[
-            "feat_step_energy",
-            "feat_step_integral",
-            "feat_step_sampleEntropy",
-            "feat_step_permEntropy",
-            "feat_step_fooofOffset",
-            "feat_step_fooofExponent",
-            "feat_step_meanPLV_seed",
-            "feat_step_maxPLV_seed",
-            "feat_tep_manual"
-        ]
-
-        results["standard"]={
-            key:json_data.get(key)
-            for key in keys
-            if key in json_data
-        }
-
-    if compute_pcist_feature is None:
-        compute_pcist_feature=bool(
-            json_data.get(
-                "do_pcist",
-                False
-            )
+        results["standard"]=dict(
+            scalar_metrics
         )
+
+        manual_peaks=json_data.get(
+            "feat_tep_manual"
+        )
+
+        if manual_peaks is not None:
+            results["standard"][
+                "manual_peaks"
+            ]=manual_peaks
 
     if compute_pcist_feature:
         print(
@@ -2811,14 +7092,6 @@ def extractFeatures(
                 "PCIst_output_dir"
             )
         }
-
-    if compute_tep_fingerprint_feature is None:
-        compute_tep_fingerprint_feature=bool(
-            json_data.get(
-                "do_tep_fingerprint",
-                False
-            )
-        )
 
     if compute_tep_fingerprint_feature:
         print(
@@ -2911,6 +7184,52 @@ def extractFeatures(
             )
         }
 
+    if compute_tep_natural_frequency_feature:
+        print(
+            "🔧 Feature extraction: "
+            "TEP Natural Frequency Rosanova"
+        )
+
+        (
+            natural_frequency_results,
+            json_data
+        )=compute_tep_natural_frequency(
+            postICA_final=postICA_final,
+            json_data=json_data,
+            experiment_dir=experiment_dir,
+            sub=sub,
+            save=True
+        )
+
+        results["TEP_natural_frequency"]={
+            "natural_frequency_hz":natural_frequency_results.get(
+                "natural_frequency_hz"
+            ),
+            "natural_frequency_power_db":natural_frequency_results.get(
+                "natural_frequency_power_db"
+            ),
+            "band_power_db":natural_frequency_results.get(
+                "band_power_db"
+            ),
+            "seed_channels":natural_frequency_results.get(
+                "seed_channels"
+            ),
+            "figure":natural_frequency_results.get(
+                "figure"
+            ),
+            "output_directory":natural_frequency_results.get(
+                "output_directory"
+            ),
+            "reference":(
+                "Rosanova et al. Natural Frequencies "
+                "of Human Corticothalamic Circuits. "
+                "Journal of Neuroscience, 2009."
+            ),
+            "reference_doi":(
+                "10.1523/JNEUROSCI.0445-09.2009"
+            )
+        }
+
     if compute_fooof:
         print(
             "🔧 Feature extraction: "
@@ -2926,11 +7245,13 @@ def extractFeatures(
 
         results["FOOOF"]={
             "n_channels":int(
-                len(df_fooof)
+                len(
+                    df_fooof
+                )
             ),
             "csv":str(
-                Path(experiment_dir)
-                /"7.FOOOF"
+                experiment_dir
+                /"6.FOOOF"
                 /"postICA_final"
                 /"postICA_final.csv"
             )
@@ -2991,13 +7312,19 @@ def extractFeatures(
             index=False
         )
 
-    json_data["feature_extraction_dir"]=str(
+    json_data[
+        "feature_extraction_dir"
+    ]=str(
         fe_dir
     )
 
-    json_data["feature_extraction_completed"]=True
+    json_data[
+        "feature_extraction_completed"
+    ]=True
 
-    json_data["feature_extraction_sections"]=[
+    json_data[
+        "feature_extraction_sections"
+    ]=[
         key
         for key in results
         if key not in (
@@ -3020,7 +7347,7 @@ def extractFeatures(
     )
 
     with open(
-        Path(experiment_dir)
+        experiment_dir
         /f"{sub}_pars.json",
         "w",
         encoding="utf-8"
@@ -3045,6 +7372,22 @@ def extractFeatures(
             "feature_extraction_sections"
         ]
     )
+
+    if compute_tep_natural_frequency_feature:
+        print(
+            "   Natural Frequency:",
+            json_data.get(
+                "TEP_natural_frequency_hz"
+            ),
+            "Hz"
+        )
+
+        print(
+            "   Rosanova figure:",
+            json_data.get(
+                "TEP_natural_frequency_figure"
+            )
+        )
 
     return results,json_data
 
@@ -3128,125 +7471,564 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
         
     return json_data
 
-def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
+    return scalar_metrics,json_data
+
+def computeFeatExtraction_v2(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub
+):
+    import json
     import numpy as np
+    import pandas as pd
     import matplotlib.pyplot as plt
-    import seaborn as sns
     import scipy.integrate
-    import antropy as ant
-    from fooof import FOOOF
     from pathlib import Path
 
-    # 1 - Seed TEP features
-    times = postICA_final.times
-    seed_indices = [postICA_final.ch_names.index(chan) for chan in json_data["seedChans"] if chan in postICA_final.ch_names]
-    json_data['feats_step'] = np.mean(postICA_final.average().get_data()[seed_indices, :], axis=0)
-    reduced_data = json_data['feats_step']
-    reduced_data, times_filtered = reduced_data[np.where(times > 0)[0]], times[np.where(times > 0)[0]]
-    data = postICA_final.get_data()
-    tep_integral = scipy.integrate.trapezoid(np.abs(reduced_data), times_filtered)
-    tep_energy = np.mean(reduced_data ** 2)
+    if postICA_final is None:
+        raise ValueError(
+            "computeFeatExtraction_v2 ha ricevuto postICA_final=None."
+        )
 
-    # Complexity metrics
-    sampen = ant.sample_entropy(reduced_data)
-    perm_entropy = ant.perm_entropy(reduced_data)
+    base_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
 
-    # FOOOF metrics
-    fs = 1.0 / (times[1] - times[0])
-    from scipy.signal import welch
-    f, psd = welch(reduced_data, fs=fs, nperseg=128)
-    fm = FOOOF()
-    fm.fit(f, psd)
-    fooof_offset, fooof_exponent = fm.get_params('aperiodic_params')
+    output_dir=(
+        base_dir
+        /"5.Extra"
+        /"FE"
+        /"StandardFeatures"
+    )
 
-    # Save features
-    json_data['feat_step_energy'] = tep_energy
-    json_data['feat_step_integral'] = tep_integral
-    json_data['feat_step_sampleEntropy'] = sampen
-    json_data['feat_step_permEntropy'] = perm_entropy
-    json_data['feat_step_fooofOffset'] = fooof_offset
-    json_data['feat_step_fooofExponent'] = fooof_exponent
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    # Salva parametri
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as txt_file:
-        for key, value in sorted(json_data.items()):
-            txt_file.write(f'{key}: {value}\n')
+    times_s=np.asarray(
+        postICA_final.times,
+        dtype=float
+    )
 
-    # 2 - Correlation matrix full
-    corr_matrix = np.corrcoef(postICA_final.average().get_data())
-    mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=0)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(corr_matrix, mask=mask, cmap="coolwarm",
-                yticklabels=postICA_final.ch_names,
-                xticklabels=postICA_final.ch_names,
-                vmin=-1, vmax=1,
-                linewidths=0.5, cbar=True)
-    plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix.png')
-    plt.close()
+    times_ms=times_s*1000.0
 
-    # 3 - Correlation matrix seed vs all
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(corr_matrix[seed_indices, :],
-                cmap="coolwarm",
-                yticklabels=np.array(postICA_final.ch_names)[seed_indices],
-                xticklabels=postICA_final.ch_names,
-                vmin=-1, vmax=1,
-                linewidths=0.5, cbar=True)
-    plt.title("Seed vs All Correlation Matrix")
-    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix_seed.png')
-    plt.close()
+    avg_data_v=np.asarray(
+        postICA_final.average().get_data(),
+        dtype=float
+    )
 
-    # 4 - Plot TEP signal
-    plt.figure(figsize=(10, 5))
-    plt.plot(postICA_final.times, postICA_final.average().get_data()[seed_indices, :].T, label=f"seed chans {json_data['seedChans']}", c='r')
-    plt.plot(postICA_final.times, json_data['feats_step'], label='average TEP', linewidth=3)
-    plt.xlabel("Time (ms)")
-    plt.ylabel('Amplitude (µV) Seed TEP')
-    plt.legend(loc='lower right')
-    plt.grid(False)
-    plt.title('Average Seed TEP')
-    plt.tight_layout()
-    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_STEP.png')
-    plt.close()
+    avg_data_uv=avg_data_v*1e6
 
-    # 5 - Peak selection
-    do_run = True
-    if do_run:
-        selected_peaks = selectTEPfeat(postICA_final, json_data, experiment_dir, sub, seed=json_data['seedChans'])
+    ch_names=list(
+        postICA_final.ch_names
+    )
 
-    from scipy.signal import hilbert
-    # 6 - Phase Locking Value (PLV)
-    def compute_PLV(data, seed_indices):
-        analytic_signal = hilbert(data, axis=-1)
-        phase = np.angle(analytic_signal)
-    
-        seed_phase = np.mean(phase[seed_indices, :], axis=0)
-        plv_values = []
-    
-        for i in range(data.shape[0]):
-            phase_diff = seed_phase - phase[i, :]
-            plv = np.abs(np.sum(np.exp(1j * phase_diff))) / len(phase_diff)
-            plv_values.append(plv)
-    
-        return np.array(plv_values)
-    
-    # Compute PLV on average TEP
-    avg_data = postICA_final.average().get_data()
-    plv_seed_all = compute_PLV(avg_data, seed_indices)
-    json_data['feat_step_meanPLV_seed'] = float(np.mean(plv_seed_all))
-    json_data['feat_step_maxPLV_seed'] = float(np.max(plv_seed_all))
+    seed_names=[
+        channel
+        for channel in json_data.get(
+            "seedChans",
+            []
+        )
+        if channel in ch_names
+    ]
 
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data_clean, json_file, indent=4)
+    if not seed_names:
+        raise ValueError(
+            "Nessun seed channel presente in postICA_final."
+        )
 
-    return json_data
+    seed_indices=[
+        ch_names.index(
+            channel
+        )
+        for channel in seed_names
+    ]
 
+    json_data["seedChans"]=list(
+        seed_names
+    )
 
-import matplotlib.pyplot as plt
-import numpy as np
-import os
+    seed_tep_uv=np.mean(
+        avg_data_uv[
+            seed_indices,
+            :
+        ],
+        axis=0
+    )
+
+    feature_window_ms=json_data.get(
+        "standard_features_window_ms",
+        json_data.get(
+            "pcist_response_window_ms",
+            (10.0,300.0)
+        )
+    )
+
+    if (
+        not isinstance(
+            feature_window_ms,
+            (list,tuple)
+        )
+        or len(feature_window_ms)!=2
+    ):
+        raise ValueError(
+            "standard_features_window_ms deve contenere "
+            "due valori [inizio,fine] in millisecondi."
+        )
+
+    feature_start_ms=float(
+        feature_window_ms[0]
+    )
+
+    feature_end_ms=float(
+        feature_window_ms[1]
+    )
+
+    data_min_ms=float(
+        np.min(
+            times_ms
+        )
+    )
+
+    data_max_ms=float(
+        np.max(
+            times_ms
+        )
+    )
+
+    effective_start_ms=max(
+        feature_start_ms,
+        data_min_ms
+    )
+
+    effective_end_ms=min(
+        feature_end_ms,
+        data_max_ms
+    )
+
+    if effective_start_ms>=effective_end_ms:
+        raise ValueError(
+            "Finestra standard features non valida: "
+            f"richiesta=[{feature_start_ms},"
+            f"{feature_end_ms}] ms; "
+            f"dati=[{data_min_ms:.3f},"
+            f"{data_max_ms:.3f}] ms."
+        )
+
+    feature_mask=(
+        (times_ms>=effective_start_ms)
+        &(times_ms<=effective_end_ms)
+    )
+
+    if np.sum(feature_mask)<2:
+        raise ValueError(
+            "La finestra delle standard features "
+            "contiene meno di due campioni."
+        )
+
+    feature_signal_uv=seed_tep_uv[
+        feature_mask
+    ]
+
+    feature_times_ms=times_ms[
+        feature_mask
+    ]
+
+    energy_uv2=float(
+        np.mean(
+            feature_signal_uv**2
+        )
+    )
+
+    absolute_integral_uv_ms=float(
+        scipy.integrate.trapezoid(
+            np.abs(
+                feature_signal_uv
+            ),
+            feature_times_ms
+        )
+    )
+
+    scalar_metrics={
+        "energy_uV2":energy_uv2,
+        "absolute_integral_uV_ms":absolute_integral_uv_ms
+    }
+
+    json_data["feats_step"]=seed_tep_uv.tolist()
+
+    json_data[
+        "feat_step_energy"
+    ]=energy_uv2
+
+    json_data[
+        "feat_step_absolute_integral"
+    ]=absolute_integral_uv_ms
+
+    json_data[
+        "feat_step_integral"
+    ]=absolute_integral_uv_ms
+
+    json_data[
+        "feat_step_energy_unit"
+    ]="uV^2"
+
+    json_data[
+        "feat_step_absolute_integral_unit"
+    ]="uV*ms"
+
+    json_data[
+        "standard_features_window_requested_ms"
+    ]=[
+        feature_start_ms,
+        feature_end_ms
+    ]
+
+    json_data[
+        "standard_features_window_effective_ms"
+    ]=[
+        effective_start_ms,
+        effective_end_ms
+    ]
+
+    json_data[
+        "standard_features_seed_channels"
+    ]=list(
+        seed_names
+    )
+
+    json_data[
+        "standard_features_metrics"
+    ]=[
+        "energy_uV2",
+        "absolute_integral_uV_ms"
+    ]
+
+    json_data.pop(
+        "feat_step_sampleEntropy",
+        None
+    )
+
+    json_data.pop(
+        "feat_step_permEntropy",
+        None
+    )
+
+    json_data.pop(
+        "feat_step_meanPLV_seed",
+        None
+    )
+
+    json_data.pop(
+        "feat_step_maxPLV_seed",
+        None
+    )
+
+    json_data.pop(
+        "feat_step_fooofOffset",
+        None
+    )
+
+    json_data.pop(
+        "feat_step_fooofExponent",
+        None
+    )
+
+    metrics_df=pd.DataFrame([
+        {
+            "subject":str(sub),
+            "metric":"Energy",
+            "value":energy_uv2,
+            "unit":"uV^2",
+            "window_start_ms":effective_start_ms,
+            "window_end_ms":effective_end_ms,
+            "seed_channels":";".join(
+                seed_names
+            )
+        },
+        {
+            "subject":str(sub),
+            "metric":"Absolute integral",
+            "value":absolute_integral_uv_ms,
+            "unit":"uV*ms",
+            "window_start_ms":effective_start_ms,
+            "window_end_ms":effective_end_ms,
+            "seed_channels":";".join(
+                seed_names
+            )
+        }
+    ])
+
+    metrics_csv=(
+        output_dir
+        /f"{sub}_FE_scalarMetrics.csv"
+    )
+
+    metrics_df.to_csv(
+        metrics_csv,
+        index=False
+    )
+
+    figure,axis=plt.subplots(
+        figsize=(12,6)
+    )
+
+    for channel_index,channel_name in zip(
+        seed_indices,
+        seed_names
+    ):
+        axis.plot(
+            times_ms,
+            avg_data_uv[
+                channel_index,
+                :
+            ],
+            linewidth=1.2,
+            alpha=0.65,
+            label=channel_name
+        )
+
+    axis.plot(
+        times_ms,
+        seed_tep_uv,
+        color="black",
+        linewidth=3,
+        label="Seed average"
+    )
+
+    axis.axvspan(
+        effective_start_ms,
+        effective_end_ms,
+        alpha=0.12,
+        label="Feature window"
+    )
+
+    axis.axvline(
+        0,
+        color="black",
+        linestyle="--",
+        linewidth=1
+    )
+
+    axis.axhline(
+        0,
+        color="black",
+        linewidth=0.8
+    )
+
+    plot_start_ms=float(
+        json_data.get(
+            "epochs_plot_timewindow_min",
+            times_s.min()
+        )
+    )*1000.0
+
+    plot_end_ms=float(
+        json_data.get(
+            "epochs_plot_timewindow_max",
+            times_s.max()
+        )
+    )*1000.0
+
+    plot_start_ms=max(
+        plot_start_ms,
+        data_min_ms
+    )
+
+    plot_end_ms=min(
+        plot_end_ms,
+        data_max_ms
+    )
+
+    axis.set_xlim(
+        plot_start_ms,
+        plot_end_ms
+    )
+
+    axis.set_xlabel(
+        "Time [ms]"
+    )
+
+    axis.set_ylabel(
+        "Amplitude [µV]"
+    )
+
+    axis.set_title(
+        f"{sub} seed TEP\n"
+        f"seed={seed_names}"
+    )
+
+    axis.legend(
+        loc="best"
+    )
+
+    axis.grid(
+        True,
+        alpha=0.20
+    )
+
+    figure.tight_layout()
+
+    seed_plot=(
+        output_dir
+        /f"{sub}_FE_STEP.png"
+    )
+
+    figure.savefig(
+        seed_plot,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(
+        figure
+    )
+
+    figure,axes=plt.subplots(
+        1,
+        2,
+        figsize=(11,5)
+    )
+
+    axes[0].bar(
+        ["Energy"],
+        [energy_uv2]
+    )
+
+    axes[0].set_ylabel(
+        "µV²"
+    )
+
+    axes[0].set_title(
+        "TEP energy"
+    )
+
+    axes[0].text(
+        0,
+        energy_uv2,
+        f"{energy_uv2:.4g}",
+        ha="center",
+        va="bottom"
+    )
+
+    axes[1].bar(
+        ["Absolute integral"],
+        [absolute_integral_uv_ms]
+    )
+
+    axes[1].set_ylabel(
+        "µV·ms"
+    )
+
+    axes[1].set_title(
+        "Absolute TEP integral"
+    )
+
+    axes[1].text(
+        0,
+        absolute_integral_uv_ms,
+        f"{absolute_integral_uv_ms:.4g}",
+        ha="center",
+        va="bottom"
+    )
+
+    figure.suptitle(
+        f"{sub} standard TEP features\n"
+        f"window={effective_start_ms:.1f}–"
+        f"{effective_end_ms:.1f} ms"
+    )
+
+    figure.tight_layout()
+
+    metrics_plot=(
+        output_dir
+        /f"{sub}_FE_scalarMetrics.png"
+    )
+
+    figure.savefig(
+        metrics_plot,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(
+        figure
+    )
+
+    json_data[
+        "feature_standard_output_dir"
+    ]=str(
+        output_dir
+    )
+
+    json_data[
+        "feature_standard_scalar_metrics_csv"
+    ]=str(
+        metrics_csv
+    )
+
+    json_data[
+        "feature_standard_scalar_metrics_plot"
+    ]=str(
+        metrics_plot
+    )
+
+    json_data[
+        "feature_standard_seed_tep_plot"
+    ]=str(
+        seed_plot
+    )
+
+    json_data[
+        "feature_standard_corr_matrix_plot"
+    ]=None
+
+    json_data[
+        "feature_standard_seed_corr_plot"
+    ]=None
+
+    json_data_clean=make_json_serializable(
+        json_data
+    )
+
+    with open(
+        base_dir/f"{sub}_pars.json",
+        "w",
+        encoding="utf-8"
+    ) as json_file:
+        json.dump(
+            json_data_clean,
+            json_file,
+            indent=4,
+            sort_keys=True
+        )
+
+    print(
+        "✅ Standard TEP features completate"
+    )
+
+    print(
+        f"   Seed channels: {seed_names}"
+    )
+
+    print(
+        f"   Window: {effective_start_ms:.1f}–"
+        f"{effective_end_ms:.1f} ms"
+    )
+
+    print(
+        f"   Energy: {energy_uv2:.6g} µV²"
+    )
+
+    print(
+        "   Absolute integral: "
+        f"{absolute_integral_uv_ms:.6g} µV·ms"
+    )
+
+    return scalar_metrics,json_data
 
 def plot_TEP_1d_with_shading(epochs, output_path):
     """
@@ -3279,129 +8061,9 @@ def plot_TEP_1d_with_shading(epochs, output_path):
     print(f"[INFO] Plot TEP_1d salvato in: {output_path}")
 
 
-def saveLoadTestFinal(postICA_final, json_data, experiment_dir, sub, start_time):
-    
-    filePKL=f'{experiment_dir}\\6.pkls\\{sub}_notebookState.pkl'
-    
-    # Function to filter out non-pickleable objects
-    def is_pickleable(obj):
-        try:
-            pickle.dumps(obj)
-            return True
-        except:
-            return False
-    
-    # Save the current state of all pickleable variables in the notebook
-    state = {name: val for name, val in globals().items() if is_pickleable(val) and not name.startswith('_')}
-    with open(filePKL, 'wb') as f:
-        pickle.dump(state, f)
-    
-    with open(filePKL, 'rb') as f:
-        data = pickle.load(f)
-    
-    for i in data.keys():
-        print(i)
-    
-    data = {}
-    """
-    # 'epochs'
-    # 'epochs_detrended'
-    # , 'epochs_ica', 
-    for file in ['postICA_final']:
-        filePKL=f'{experiment_dir}\\6.pkls\\{sub}_{file}.pkl'
-        with open(filePKL, 'rb') as f:
-            data[file] = pickle.load(f)
-            basicPlots(data[file], json_data, experiment_dir, sub, key=file, subPath='5.final', show=json_data['showPlotsEnd'])
-            plt.close()
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(data['postICA_final'].times*1e3, np.mean(data['postICA_final'].get_data(), axis=0).T*1e6, c='k', linewidth=0.2)
-    #plt.axvline(x=0+10, c='r', linestyle='--', label='stim')
-    plt.xlabel('Time (ms)')
-    plt.ylabel('Amplitude (µV)')
-    plt.xlim(-100, 400)
-    plt.grid(False)
-    plt.savefig(f'{experiment_dir}\\5.final\\tep_comparison.png')
-    plt.close()
-    """
-    # json_data = add_TEP_to_json(json_data, postICA_final) # too much heavy use directly pkl
-    # plot_TEP_1d_with_shading(postICA_final, f'{experiment_dir}/5.Extra/tep_1D.png')
 
-    # Calcolo tempo totale di esecuzione
-    elapsed_time = time.time() - start_time
-    json_data['finish_time'] = time.time()
-    json_data['total_elapsed_time_sec'] = round(elapsed_time, 2)
-    
-    # Salva il file di parametri aggiornato con tempo incluso
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data_clean, json_file, indent=4)
-            
-    print(f"✅ Tempo totale di esecuzione: {elapsed_time:.2f} secondi")
 
-    return json_data
-
-def saveLoadTestFinal_old_20260416(postICA_final, json_data, experiment_dir, sub, start_time):
-    
-    filePKL=f'{experiment_dir}\\6.pkls\\{sub}_notebookState.pkl'
-    
-    # Function to filter out non-pickleable objects
-    def is_pickleable(obj):
-        try:
-            pickle.dumps(obj)
-            return True
-        except:
-            return False
-    
-    # Save the current state of all pickleable variables in the notebook
-    state = {name: val for name, val in globals().items() if is_pickleable(val) and not name.startswith('_')}
-    with open(filePKL, 'wb') as f:
-        pickle.dump(state, f)
-    
-    with open(filePKL, 'rb') as f:
-        data = pickle.load(f)
-    
-    for i in data.keys():
-        print(i)
-    
-    data = {}
-    # 'epochs'
-    # 'epochs_detrended'
-    # , 'epochs_ica', 
-    for file in ['postICA_final']:
-        filePKL=f'{experiment_dir}\\6.pkls\\{sub}_{file}.pkl'
-        with open(filePKL, 'rb') as f:
-            data[file] = pickle.load(f)
-            basicPlots(data[file], json_data, experiment_dir, sub, key=file, subPath='5.final', show=json_data['showPlotsEnd'])
-            plt.close()
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(data['postICA_final'].times*1e3, np.mean(data['postICA_final'].get_data(), axis=0).T*1e6, c='k', linewidth=0.2)
-    #plt.axvline(x=0+10, c='r', linestyle='--', label='stim')
-    plt.xlabel('Time (ms)')
-    plt.ylabel('Amplitude (µV)')
-    plt.xlim(-100, 400)
-    plt.grid(False)
-    plt.savefig(f'{experiment_dir}\\5.final\\tep_comparison.png')
-    plt.close()
-
-    # json_data = add_TEP_to_json(json_data, postICA_final) # too much heavy use directly pkl
-           
-    plot_TEP_1d_with_shading(postICA_final, f'{experiment_dir}/5.final/tep_1D.png')
-
-    # Calcolo tempo totale di esecuzione
-    elapsed_time = time.time() - start_time
-    json_data['finish_time'] = time.time()
-    json_data['total_elapsed_time_sec'] = round(elapsed_time, 2)
-    
-    # Salva il file di parametri aggiornato con tempo incluso
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-            json.dump(json_data_clean, json_file, indent=4)
-            
-    print(f"✅ Tempo totale di esecuzione: {elapsed_time:.2f} secondi")
-
-    return json_data
 
 
 def selectTEPfeat(EPOCH,  json_data, experiment_dir, sub, seed=['Cz', 'Fz']):
@@ -3533,8 +8195,6 @@ def polyfit_constrained_start(x, y, order, x0, y0):
     return trend_line, coeffs_reduced
 
 
-import numpy as np
-
 def compute_condition_number_epochs_average(epochs):
     """
     Calcola il numero di condizionamento della matrice dei dati EEG
@@ -3598,13 +8258,20 @@ def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
 
     epochs_ica = EPOCHS.copy().pick(picks_ica)
 
-    ica = ICA(
+    ica_random_state=int(
+        json_data.get(
+            "ICA_seed",
+            42
+        )
+    )
+    json_data["ICA_seed"]=ica_random_state
+    ica=ICA(
         n_components=n_components,
         method="fastica",
-        random_state=42,
+        random_state=ica_random_state,
         max_iter="auto"
     )
-
+ 
     ica.fit(epochs_ica)
 
     ic_labels = label_components(
@@ -3807,448 +8474,6 @@ def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
 
     return postICA_clean, ica
 
-
-def run_ica_filtering_v3_20072026(EPOCHS, json_data, experiment_dir, sub,
-                         n_components=None, manualCheck=True,
-                         autoReject=True, label_prob_threshold=0,
-                         threshold_percentile=75):
-
-    from pathlib import Path
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from mne.preprocessing import ICA
-    from mne_icalabel import label_components
-    import json
-
-    save_dir = Path(experiment_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    ica = ICA(n_components=n_components, method='fastica', random_state=42)
-    ica.fit(EPOCHS)
-
-    ic_labels = label_components(EPOCHS, ica, method='iclabel')
-    labels = ic_labels['labels']
-
-    artifact_tags = [
-        'eye blink',
-        'muscle artifact',
-        'heart beat',
-        'line noise',
-        'channel noise',
-        'other'
-    ]
-
-    auto_excluded = []
-    low_eigen_excluded = []
-
-    mixing_matrix = ica.mixing_matrix_
-    eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-    threshold = np.percentile(eigenvalues, threshold_percentile)
-
-    if autoReject:
-        for i, label in enumerate(labels):
-            probs = np.array(ic_labels['y_pred_proba'][i], ndmin=1)
-            max_prob = probs.max()
-
-            if label in artifact_tags and max_prob >= label_prob_threshold:
-                print(f"❌ IC {i+1}: {label} (prob: {max_prob:.2f}) – escluso automaticamente") # prima era {i} e printava 0, ora parte da 1 come nella gui
-                auto_excluded.append(i)
-            else:
-                print(f"✅ IC {i}: {label} (prob: {max_prob:.2f}) – mantenuto automaticamente")
-
-        low_eigen_excluded = np.where(eigenvalues <= threshold)[0].tolist()
-
-        print(f"[Auto-tagging] Componenti escluse per ICLabel: {auto_excluded}")
-        print(f"[Autovalori] Componenti escluse eigenvalue <= {threshold:.4f}: {low_eigen_excluded}")
-
-    else:
-        print("🚫 Esclusione automatica disattivata.")
-
-    initial_excluded = sorted(set(auto_excluded + low_eigen_excluded)) if autoReject else []
-    ica.exclude = initial_excluded.copy()
-
-    json_data["ICA_autoExcludedComponents"] = [int(x) for x in auto_excluded]
-    json_data["ICA_lowEigenExcludedComponents"] = [int(x) for x in low_eigen_excluded]
-    json_data["ICA_initialExcludedComponents"] = [int(x) for x in initial_excluded]
-
-    all_components = set(np.arange(ica.n_components_))
-    initial_remaining = sorted(list(all_components - set(initial_excluded)))
-
-    if initial_excluded:
-        fig1 = ica.plot_components(picks=initial_excluded, show_names=False, show=False)
-        fig1.savefig(save_dir / f'{sub}_AUTO_excluded_ICAs.png')
-        plt.close(fig1)
-
-    if initial_remaining:
-        fig2 = ica.plot_components(picks=initial_remaining, show_names=False, show=False)
-        fig2.savefig(save_dir / f'{sub}_AUTO_included_ICAs.png')
-        plt.close(fig2)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    above_threshold = np.where(eigenvalues >= threshold)[0]
-    below_threshold = np.where(eigenvalues < threshold)[0]
-
-    ax.plot(
-        below_threshold,
-        eigenvalues[below_threshold],
-        marker='o',
-        linestyle='-',
-        color='black',
-        label='Eigenvalues'
-    )
-
-    ax.scatter(
-        above_threshold,
-        eigenvalues[above_threshold],
-        color='red',
-        label='Above threshold',
-        zorder=3
-    )
-
-    ax.axhline(
-        threshold,
-        color='r',
-        linestyle='--',
-        label=f'Threshold ({threshold_percentile}° percentile)'
-    )
-
-    ax.set_xlabel("ICA Component")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"Eigenvalues of ICA Components")
-    ax.legend()
-    fig.savefig(save_dir / f'{sub}_eigenvalueDist.png')
-    plt.close(fig)
-
-    components_dir = save_dir / 'components'
-    components_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx in range(ica.n_components_):
-        tag = labels[idx] if labels is not None else 'Unknown'
-        tag_clean = tag.replace('/', '_').replace(' ', '')
-
-        fig = ica.plot_components(picks=idx, show=False)
-
-        if isinstance(fig, list):
-            for i, f in enumerate(fig):
-                fname = components_dir / f"component_{idx}_{tag_clean}_view{i}.png"
-                f.savefig(fname, dpi=150)
-                plt.close(f)
-        else:
-            fname = components_dir / f"component_{idx}_{tag_clean}.png"
-            fig.savefig(fname, dpi=150)
-            plt.close(fig)
-
-    if manualCheck:
-        try:
-            import tmspath_utils_adj
-
-            print(f"🖱️ Manual ICA check. Componenti pre-marcate: {ica.exclude}")
-            ica = tmspath_utils_adj.ICApp(ica, EPOCHS.copy())
-
-        except ImportError:
-            print("⚠️ tmspath_utils_adj non disponibile. Salto ispezione manuale.")
-
-    final_excluded = sorted(set([int(x) for x in ica.exclude]))
-    ica.exclude = final_excluded
-
-    json_data["ICA_finalExcludedComponents"] = final_excluded
-    json_data["ICA_manualAddedComponents"] = sorted(list(set(final_excluded) - set(initial_excluded)))
-    json_data["ICA_manualRecoveredComponents"] = sorted(list(set(initial_excluded) - set(final_excluded)))
-
-    print(f"📌 ICA initial excluded: {initial_excluded}")
-    print(f"📌 ICA final excluded:   {final_excluded}")
-    print(f"📌 ICA manual added:     {json_data['ICA_manualAddedComponents']}")
-    print(f"📌 ICA manual recovered: {json_data['ICA_manualRecoveredComponents']}")
-
-    postICA_clean = ica.apply(EPOCHS.copy())
-
-    final_remaining = sorted(list(all_components - set(final_excluded)))
-
-    if final_excluded:
-        fig3 = ica.plot_components(picks=final_excluded, show_names=False, show=False)
-        fig3.savefig(save_dir / f'{sub}_FINAL_excluded_ICAs.png')
-        plt.close(fig3)
-
-    if final_remaining:
-        fig4 = ica.plot_components(picks=final_remaining, show_names=False, show=False)
-        fig4.savefig(save_dir / f'{sub}_FINAL_included_ICAs.png')
-        plt.close(fig4)
-
-    with open(save_dir / f'{sub}_ICA_selection_summary.json', 'w') as f:
-        json.dump({
-            "auto_excluded": json_data["ICA_autoExcludedComponents"],
-            "low_eigen_excluded": json_data["ICA_lowEigenExcludedComponents"],
-            "initial_excluded": json_data["ICA_initialExcludedComponents"],
-            "final_excluded": json_data["ICA_finalExcludedComponents"],
-            "manual_added": json_data["ICA_manualAddedComponents"],
-            "manual_recovered": json_data["ICA_manualRecoveredComponents"]
-        }, f, indent=4)
-
-    return postICA_clean, ica
-
-
-"""
-until 01/07/2026
-def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
-                         n_components=None, manualCheck=True,
-                         autoReject=True, label_prob_threshold=0,
-                         threshold_percentile=75):
-
-    from pathlib import Path
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from mne.preprocessing import ICA
-    from mne_icalabel import label_components
-
-    save_dir = Path(experiment_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    ica = ICA(n_components=n_components, method='fastica', random_state=42)
-    ica.fit(EPOCHS)
-
-    ic_labels = label_components(EPOCHS, ica, method='iclabel')
-    labels = ic_labels['labels']
-
-    artifact_tags = ['eye blink', 'muscle artifact', 'heart beat', 'line noise', 'channel noise', 'other']
-    auto_excluded = []
-    low_eigen_excluded = []
-
-    if autoReject:
-        for i, label in enumerate(labels):
-            probs = np.array(ic_labels['y_pred_proba'][i], ndmin=1)
-            max_prob = probs.max()
-            if label in artifact_tags and max_prob >= label_prob_threshold:
-                print(f"❌ IC {i}: {label} (prob: {max_prob:.2f}) – escluso")
-                auto_excluded.append(i)
-            else:
-                print(f"✅ IC {i}: {label} (prob: {max_prob:.2f}) – mantenuto")
-
-        print(f"[Auto-tagging] Componenti escluse per label ICLabel: {auto_excluded}")
-
-        mixing_matrix = ica.mixing_matrix_
-        eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-        threshold = np.percentile(eigenvalues, threshold_percentile)
-        low_eigen_excluded = np.where(eigenvalues <= threshold)[0].tolist()
-        print(f"[Autovalori] Componenti escluse (eigenvalue < {threshold:.4f}): {low_eigen_excluded}")
-    else:
-        print("🚫 Esclusione automatica disattivata.")
-        mixing_matrix = ica.mixing_matrix_
-        eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-        threshold = np.percentile(eigenvalues, threshold_percentile)
-
-    excluded_components = sorted(set(auto_excluded + low_eigen_excluded)) if autoReject else []
-    ica.exclude = excluded_components
-
-    postICA_raw = ica.apply(EPOCHS.copy())
-
-    all_components = set(np.arange(ica.get_components().shape[1]))
-    remaining_components = list(all_components - set(excluded_components))
-
-    if excluded_components:
-        fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-        fig1.savefig(save_dir / f'{sub}_excluded_ICAs.png')
-        plt.close(fig1)
-
-    if remaining_components:
-        fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-        fig2.savefig(save_dir / f'{sub}_included_ICAs.png')
-        plt.close(fig2)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    above_threshold = np.where(eigenvalues >= threshold)[0]
-    below_threshold = np.where(eigenvalues < threshold)[0]
-    ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
-    ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
-    ax.set_xlabel("ICA Component")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
-    ax.legend()
-    fig.savefig(save_dir / f'{sub}_eigenvalueDist.png')
-    plt.close(fig)
-
-    components_dir = save_dir / 'components'
-    components_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"[INFO] Salvataggio componenti ICA in: {components_dir}")
-
-    for idx in range(ica.n_components_):
-        tag = labels[idx] if labels is not None else 'Unknown'
-        tag_clean = tag.replace('/', '_').replace(' ', '')
-        fig = ica.plot_components(picks=idx, show=False)
-        if isinstance(fig, list):
-            for i, f in enumerate(fig):
-                fname = components_dir / f"component_{idx}_{tag_clean}_view{i}.png"
-                f.savefig(fname, dpi=150)
-                plt.close(f)
-        else:
-            fname = components_dir / f"component_{idx}_{tag_clean}.png"
-            fig.savefig(fname, dpi=150)
-            plt.close(fig)
-
-    if manualCheck:
-        try:
-            import tmspath_utils_adj
-            ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
-            postICA_clean = ica.apply(postICA_raw.copy())
-        except ImportError:
-            print("⚠️ tmspath_utils_adj non disponibile. Salto ispezione manuale.")
-            postICA_clean = postICA_raw
-    else:
-        postICA_clean = postICA_raw
-
-    return postICA_clean, ica
-"""
-
-def run_ica_filtering_v3_old_20260416(EPOCHS, json_data, experiment_dir, sub,
-                         n_components=None, manualCheck=True,
-                          autoReject=True, label_prob_threshold=0,
-                          threshold_percentile=75,
-                          subPath='4.postICA',
-                          ):
-
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from mne.preprocessing import ICA
-    from mne_icalabel import label_components
-
-    # ICA decomposition
-    ica = ICA(n_components=n_components, method='fastica', random_state=42)
-    ica.fit(EPOCHS)
-
-    # 1. Auto-tagging delle componenti
-    ic_labels = label_components(EPOCHS, ica, method='iclabel')
-    labels = ic_labels['labels']
-
-    artifact_tags = ['eye blink', 'muscle artifact', 'heart beat', 'line noise', 'channel noise', 'other']
-    auto_excluded = []
-    low_eigen_excluded = []
-
-    # 2. Esclusione automatica (opzionale)
-    if autoReject:
-        for i, label in enumerate(labels):
-            probs = np.array(ic_labels['y_pred_proba'][i], ndmin=1)
-            max_prob = probs.max()
-            if label in artifact_tags and max_prob >= label_prob_threshold:
-                print(f"❌ IC {i}: {label} (prob: {max_prob:.2f}) – escluso")
-                auto_excluded.append(i)
-            else:
-                print(f"✅ IC {i}: {label} (prob: {max_prob:.2f}) – mantenuto")
-
-        print(f"[Auto-tagging] Componenti escluse per label ICLabel: {auto_excluded}")
-
-        # 3. Filtro per soglia su autovalori
-        mixing_matrix = ica.mixing_matrix_
-        eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-        threshold = np.percentile(eigenvalues, threshold_percentile)
-        low_eigen_excluded = np.where(eigenvalues <= threshold)[0].tolist()
-        print(f"[Autovalori] Componenti escluse (eigenvalue < {threshold:.4f}): {low_eigen_excluded}")
-    else:
-        print("🚫 Esclusione automatica disattivata.")
-        mixing_matrix = ica.mixing_matrix_
-        eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-        threshold = np.percentile(eigenvalues, threshold_percentile)
-
-    excluded_components = sorted(set(auto_excluded + low_eigen_excluded)) if autoReject else []
-    ica.exclude = excluded_components
-
-    # 4. Applica ICA per rimuovere componenti escluse
-    postICA_raw = ica.apply(EPOCHS.copy())
-
-    # 5. Salvataggio grafici riassuntivi
-    all_components = set(np.arange(ica.get_components().shape[1]))
-    remaining_components = list(all_components - set(excluded_components))
-
-    if excluded_components:
-        fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-        fig1.savefig(os.path.join(experiment_dir, subPath, f'{sub}_excluded_ICAs.png'))
-        plt.close(fig1)
-
-    if remaining_components:
-        fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-        fig2.savefig(os.path.join(experiment_dir, subPath, f'{sub}_included_ICAs.png'))
-        plt.close(fig2)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    above_threshold = np.where(eigenvalues >= threshold)[0]
-    below_threshold = np.where(eigenvalues < threshold)[0]
-    ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
-    ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
-    ax.set_xlabel("ICA Component")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
-    ax.legend()
-    fig.savefig(os.path.join(experiment_dir, subPath, f'{sub}_eigenvalueDist.png'))
-    plt.close(fig)
-
-    # === SALVA COMPONENTI ICA SINGOLE CON TAG ===
-    components_dir = os.path.join(experiment_dir, subPath, 'components')
-    os.makedirs(components_dir, exist_ok=True)
-
-    print(f"[INFO] Salvataggio componenti ICA in: {components_dir}")
-
-    for idx in range(ica.n_components_):
-        tag = labels[idx] if labels is not None else 'Unknown'
-        tag_clean = tag.replace('/', '_').replace(' ', '')
-        fig = ica.plot_components(picks=idx, show=False)
-        if isinstance(fig, list):
-            for i, f in enumerate(fig):
-                fname = os.path.join(components_dir, f"component_{idx}_{tag_clean}_view{i}.png")
-                f.savefig(fname, dpi=150)
-                plt.close(f)
-        else:
-            fname = os.path.join(components_dir, f"component_{idx}_{tag_clean}.png")
-            fig.savefig(fname, dpi=150)
-            plt.close(fig)
-
-    # 6. Controllo manuale finale (opzionale)
-    if manualCheck:
-        try:
-            import tmspath_utils_adj
-            ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
-            postICA_clean = ica.apply(postICA_raw.copy())
-        except ImportError:
-            print("⚠️ tmspath_utils_adj non disponibile. Salto ispezione manuale.")
-            postICA_clean = postICA_raw
-    else:
-        postICA_clean = postICA_raw
-
-    return postICA_clean, ica
-
-
-""" 20072026
-def postICAsteps(postICA_raw, json_data, experiment_dir, sub):
-    postICA_final = postICA_raw.copy().filter(l_freq=json_data['l_freq'],
-                                              h_freq=json_data['h_freq'], #*0.90, # *2
-                                              method = 'fir', #'iir', #, # NEW
-                                              #iir_params = dict(order=3, ftype='butter', phase='zero-double',btype='bandpass'), # TEST IF WAS THIS FOR CIRCLING->YES
-                                              verbose=True)
-    
-    newrate=json_data['sfreq'] 
-    postICA_final=postICA_final.resample(sfreq = newrate)
-    postICA_final=postICA_final.interpolate_bads()
-    
-    postICA_final = postICA_final.pick('eeg') # Pick only eeg channels
-    times = postICA_final.times
-    ch_names = postICA_final.ch_names
-    
-    with open(f'{experiment_dir}\\6.pkls\\{sub}_postICA_final.pkl', 'wb') as f:
-        pickle.dump(postICA_final, f)
-        json_data['mneEpochArrayFinal']=postICA_final # NEW
-        
-    json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
-        json.dump(json_data_clean, json_file, indent=4)
-
-    return postICA_final
-"""
-
-
-
-
-
 def postICAsteps(postICA_raw, json_data, experiment_dir, sub):
     import pickle
     import json
@@ -4293,7 +8518,7 @@ def postICAsteps(postICA_raw, json_data, experiment_dir, sub):
     json_data["reference_after_ica"] = "average"
     json_data["postICA_final_channels"] = list(ch_names)
 
-    pkl_dir = Path(experiment_dir) / "6.pkls"
+    pkl_dir = Path(experiment_dir) / "7.pkls"
     pkl_dir.mkdir(parents=True, exist_ok=True)
 
     with open(pkl_dir / f"{sub}_postICA_final.pkl", "wb") as f:
@@ -4480,131 +8705,6 @@ def find_outlier_channels_by_twindow_v3(df_slopes, threshold=3):
     return outlier_channels, found_outlier
 
 
-def run_ica_filtering(EPOCHS, n_components=None, manualCheck=True, threshold_percentile=75, subPath='4.postICA', saveNote='postICA'):
-    
-    #ic_labels, ica = runICA(EPOCHS)    
-    ica = mne.preprocessing.ICA(n_components=n_components, method='fastica', random_state=42)
-    ica.fit(EPOCHS)
-
-    mixing_matrix = ica.mixing_matrix_
-    eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2  # Autovalori
-    threshold = np.percentile(eigenvalues, threshold_percentile)
-    excluded_components = np.where(eigenvalues <= threshold)[0].tolist()
-    print(f"Componenti escluse (eigenvalue < {threshold:.4f}): {excluded_components}")
-    ica.exclude = excluded_components
-    postICA_raw = ica.apply(EPOCHS.copy())
-    all_components = set(np.arange(ica.get_components().shape[1]))
-    remaining_components = list(all_components - set(excluded_components))
-    fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-    fig1.savefig(f'{experiment_dir}\\{subPath}\\{sub}_excluded_ICAs_{saveNote}.png')
-    plt.close()
-    fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-    fig2.savefig(f'{experiment_dir}\\{subPath}\\{sub}_included_ICAs_{saveNote}.png')
-    plt.close()
-    fig, ax = plt.subplots(figsize=(10, 5))
-    above_threshold = np.where(eigenvalues >= threshold)[0]  # Indici sopra soglia
-    below_threshold = np.where(eigenvalues < threshold)[0]   # Indici sotto soglia
-    ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
-    ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
-    ax.set_xlabel("ICA Component")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
-    ax.legend()
-    fig.savefig(f'{experiment_dir}\\{subPath}\\{sub}_eigenvalueDist_{saveNote}.png')
-    plt.close()
-    if manualCheck: 
-        ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
-        postICA_raw_bis = ica.apply(postICA_raw.copy())  
-        postICA_clean = postICA_raw_bis
-        ica.exclude = excluded_components
-
-    if not manualCheck: 
-        postICA_clean = postICA_raw
-
-    return postICA_clean, ica
-
-
-def run_ica_filtering_v2(EPOCHS, n_components=None, manualCheck=True, threshold_percentile=75,
-                          subPath='4.postICA', saveNote='postICA', experiment_dir='.', sub='subject'):
-
-    from mne.preprocessing import ICA
-    from mne_icalabel import label_components
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import os
-
-    os.makedirs(os.path.join(experiment_dir, subPath), exist_ok=True)
-
-    # ICA decomposition
-    ica = ICA(n_components=n_components, method='fastica', random_state=42)
-    ica.fit(EPOCHS)
-
-    # 1. Auto-tagging delle componenti
-    ic_labels = label_components(EPOCHS, ica, method='iclabel')
-    labels = ic_labels['labels']
-
-    artifact_tags = ['eye blink', 'muscle artifact', 'heart beat', 'line noise', 'channel noise', 'other']
-    auto_excluded = [i for i, label in enumerate(labels) if label in artifact_tags]
-
-    print(f"[Auto-tagging] Componenti escluse per label ICLabel: {auto_excluded}")
-
-    # 2. Filtro per soglia su autovalori
-    mixing_matrix = ica.mixing_matrix_
-    eigenvalues = np.linalg.svd(mixing_matrix, compute_uv=False) ** 2
-    threshold = np.percentile(eigenvalues, threshold_percentile)
-    low_eigen_excluded = np.where(eigenvalues <= threshold)[0].tolist()
-
-    print(f"[Autovalori] Componenti escluse (eigenvalue < {threshold:.4f}): {low_eigen_excluded}")
-
-    # 3. Unione esclusioni
-    excluded_components = sorted(set(auto_excluded + low_eigen_excluded))
-    ica.exclude = excluded_components
-
-    # 4. Applica ICA per rimuovere componenti escluse
-    postICA_raw = ica.apply(EPOCHS.copy())
-
-    # 5. Salvataggio grafici
-    all_components = set(np.arange(ica.get_components().shape[1]))
-    remaining_components = list(all_components - set(excluded_components))
-
-    fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-    fig1.savefig(os.path.join(experiment_dir, subPath, f'{sub}_excluded_ICAs_{saveNote}.png'))
-    plt.close()
-
-    fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-    fig2.savefig(os.path.join(experiment_dir, subPath, f'{sub}_included_ICAs_{saveNote}.png'))
-    plt.close()
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    above_threshold = np.where(eigenvalues >= threshold)[0]
-    below_threshold = np.where(eigenvalues < threshold)[0]
-    ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
-    ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
-    ax.set_xlabel("ICA Component")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
-    ax.legend()
-    fig.savefig(os.path.join(experiment_dir, subPath, f'{sub}_eigenvalueDist_{saveNote}.png'))
-    plt.close()
-
-    # 6. Controllo manuale finale
-    if manualCheck:
-        try:
-            import tmspath_utils_adj
-            ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
-            postICA_clean = ica.apply(postICA_raw.copy())
-        except ImportError:
-            print("tmspath_utils_adj non disponibile. Salto ispezione manuale.")
-            postICA_clean = postICA_raw
-    else:
-        postICA_clean = postICA_raw
-
-    return postICA_clean, ica
-
-
-
 def run_ica_artist_ext_only(EPOCHS, n_components=None, ext_threshold_uv=30, manualCheck=True, subPath='4.postICA', saveNote='postICA'):
     import os
     os.makedirs(f'{experiment_dir}\\{subPath}', exist_ok=True)
@@ -4650,6 +8750,8 @@ def run_ica_artist_ext_only(EPOCHS, n_components=None, ext_threshold_uv=30, manu
     return postICA_clean, ica
 
 
+
+
 def run_ica_artist_tms_events(raw, events, n_components=None, 
                               ext_threshold_uv=30, 
                               window_ms=50, 
@@ -4687,7 +8789,21 @@ def run_ica_artist_tms_events(raw, events, n_components=None,
         raw._data[eeg_picks] = eeg_data / 1e6  # torna in Volt
 
     # ----------- ICA -----------
-    ica = mne.preprocessing.ICA(n_components=n_components, method='fastica', random_state=42)
+    ica_random_state=int(
+        json_data.get(
+            "ICA_seed",
+            42
+        )
+    )
+    json_data["ica_random_state"]=ica_random_state
+    
+    ica=mne.preprocessing.ICA(
+        n_components=n_components,
+        method="fastica",
+        random_state=ica_random_state,
+        max_iter="auto"
+    )
+   
     ica.fit(raw)
 
     sources = ica.get_sources(raw).get_data() * 1e6  # sorgenti in μV
@@ -4829,37 +8945,180 @@ def plot_customTEP(EPOCHS, subDir, key, FIGSIZE):
     plt.close(fig)
     """
 
-def basicPlots(EPOCHS, json_data, experiment_dir, sub, key='epochs', subPath='1.basic', figsize=FIGSIZE, show=False, do_psdtopomap=False):
-    fig = EPOCHS.average().plot(show=show, spatial_colors=True)  
-    fig.set_size_inches(figsize[0], figsize[1])
-    fig.savefig(f'{experiment_dir}\\{subPath}\\tep_{key}.png')
-    plt.close()
+def get_epoch_plot_limits(epochs,json_data):
+    data_min=float(epochs.times.min())
+    data_max=float(epochs.times.max())
+
+    plot_min=float(
+        json_data.get(
+            "epochs_plot_timewindow_min",
+            data_min
+        )
+    )
+
+    plot_max=float(
+        json_data.get(
+            "epochs_plot_timewindow_max",
+            data_max
+        )
+    )
+
+    plot_min=max(
+        plot_min,
+        data_min
+    )
+
+    plot_max=min(
+        plot_max,
+        data_max
+    )
+
+    if plot_min>=plot_max:
+        raise ValueError(
+            f"Limiti grafici non validi: "
+            f"[{plot_min},{plot_max}] s; "
+            f"dati disponibili [{data_min},{data_max}] s."
+        )
+
+    return plot_min,plot_max
     
-    fig = EPOCHS.average().plot_topo(show=show)
-    fig.set_size_inches(figsize[0], figsize[1])
-    fig.savefig(f'{experiment_dir}\\{subPath}\\topo_{key}.png')
-    plt.close()
-    
-    fig = EPOCHS.plot_psd(method='welch', 
-                          fmin=EPOCHS.info['highpass'], 
-                          fmax=EPOCHS.info['lowpass'], 
-                          xscale='log',
-                          show=show)
-    fig.set_size_inches(figsize[0], figsize[1])
-    fig.savefig(f'{experiment_dir}\\{subPath}\\PSD_{key}.png')
-    plt.close()
+def basicPlots(
+    EPOCHS,
+    json_data,
+    experiment_dir,
+    sub,
+    key="epochs",
+    subPath="1.basic",
+    figsize=FIGSIZE,
+    show=False,
+    do_psdtopomap=False
+):
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    output_dir=Path(experiment_dir)/subPath
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    plot_tmin,plot_tmax=get_epoch_plot_limits(
+        EPOCHS,
+        json_data
+    )
+
+    evoked=EPOCHS.average()
+
+    fig=evoked.plot(
+        show=show,
+        spatial_colors=True,
+        time_unit="s"
+    )
+
+    fig.set_size_inches(
+        figsize[0],
+        figsize[1]
+    )
+
+    for ax in fig.axes:
+        if ax.get_xlabel() or ax.lines:
+            ax.set_xlim(
+                plot_tmin,
+                plot_tmax
+            )
+
+    fig.savefig(
+        output_dir/f"tep_{key}.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+    evoked_plot=evoked.copy().crop(
+        tmin=plot_tmin,
+        tmax=plot_tmax,
+        include_tmax=True
+    )
+
+    fig=evoked_plot.plot_topo(
+        show=show
+    )
+
+    fig.set_size_inches(
+        figsize[0],
+        figsize[1]
+    )
+
+    fig.savefig(
+        output_dir/f"topo_{key}.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+    fig=EPOCHS.compute_psd(
+        method="welch",
+        fmin=max(
+            0.0,
+            float(
+                EPOCHS.info.get(
+                    "highpass",
+                    0.0
+                )
+            )
+        ),
+        fmax=float(
+            EPOCHS.info.get(
+                "lowpass",
+                EPOCHS.info["sfreq"]/2
+            )
+        )
+    ).plot(
+        xscale="log",
+        show=show
+    )
+
+    fig.set_size_inches(
+        figsize[0],
+        figsize[1]
+    )
+
+    fig.savefig(
+        output_dir/f"PSD_{key}.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
 
     if do_psdtopomap:
-        fig = EPOCHS.plot_psd_topomap(method='welch', cmap='turbo',
-                            fmin=EPOCHS.info['highpass'], 
-                            fmax=EPOCHS.info['lowpass'], 
-                            show=show,
-                            normalize=True)
-        fig.set_size_inches(figsize[0], figsize[1])
-        fig.savefig(f'{experiment_dir}\\{subPath}\\PSD_topomap_{key}.png')
-        plt.close()
+        fig=EPOCHS.compute_psd(
+            method="welch"
+        ).plot_topomap(
+            cmap="turbo",
+            show=show,
+            normalize=True
+        )
 
-    #plot_customTEP(EPOCHS, subPath, key, FIGSIZE)
+        fig.set_size_inches(
+            figsize[0],
+            figsize[1]
+        )
+
+        fig.savefig(
+            output_dir/f"PSD_topomap_{key}.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+    json_data["epochs_plot_timewindow_effective"]=[
+        float(plot_tmin),
+        float(plot_tmax)
+    ]
 
 
 def create_butterfly_topomap_gif(
@@ -5183,22 +9442,104 @@ def save_bad_epochs_and_channels(info_string, experiment_dir, sub, json_data):
     with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
 
-def plotTrialTepVariability(epochs, json_data, experiment_dir, sub, chanNAME='AF3', operator=np.mean, save=False, 
-                            figsize=FIGSIZE, parDir='preDetrend'):
-    fig, ax = plt.subplots(1, 1, figsize=figsize, sharey=False, sharex=True)
-    i = np.where(np.array(epochs.ch_names)==chanNAME)[0][0]
-    ax.plot(epochs.times, epochs.get_data()[:, i, :].T, c='b', linewidth=1, alpha=0.5)
-    ax.plot(epochs.times, operator(epochs.get_data()[:, i, :], axis=0), c='r', label=str(operator), linewidth=5)
-    ax.set_title(f'{epochs.ch_names[i]}')
-    ax.axvline(0, color='k', linestyle='--')
-    #ax.set_xlim(json_data['epochs_timewindow_min'], json_data['epochs_timewindow_max'] )
+def plotTrialTepVariability(
+    epochs,
+    json_data,
+    experiment_dir,
+    sub,
+    chanNAME="AF3",
+    operator=np.mean,
+    save=False,
+    figsize=FIGSIZE,
+    parDir="preDetrend"
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    plot_tmin,plot_tmax=get_epoch_plot_limits(
+        epochs,
+        json_data
+    )
+
+    channel_index=epochs.ch_names.index(
+        chanNAME
+    )
+
+    channel_data=epochs.get_data()[
+        :,
+        channel_index,
+        :
+    ]
+
+    fig,ax=plt.subplots(
+        figsize=figsize
+    )
+
+    ax.plot(
+        epochs.times,
+        channel_data.T,
+        color="b",
+        linewidth=1,
+        alpha=0.5
+    )
+
+    ax.plot(
+        epochs.times,
+        operator(
+            channel_data,
+            axis=0
+        ),
+        color="r",
+        linewidth=5,
+        label=operator.__name__
+    )
+
+    ax.axvline(
+        0,
+        color="k",
+        linestyle="--"
+    )
+
+    ax.set_xlim(
+        plot_tmin,
+        plot_tmax
+    )
+
+    ax.set_title(
+        chanNAME
+    )
+
+    ax.set_xlabel(
+        "Time [s]"
+    )
+
+    ax.set_ylabel(
+        "Amplitude [V]"
+    )
+
     ax.legend()
-    ax.set_xlabel('Times [s]')
-    ax.set_ylabel('Amplitude [V]')   
-    plt.tight_layout()
+
+    fig.tight_layout()
+
     if save:
-        saveNote = f'tepVar_{chanNAME}'
-        fig.savefig(f'{experiment_dir}/3.trials/{parDir}/{sub}_{saveNote}.png')
+        output_dir=(
+            Path(experiment_dir)
+            /"2.trials"
+            /parDir
+        )
+
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        fig.savefig(
+            output_dir/f"{sub}_tepVar_{chanNAME}.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+
     plt.close(fig)
 
 def computeTimeMasks(epochs, chan, trial, json_data, do_plot=False, offset=0.20, plot_path=None, plot_title=None):
@@ -5397,7 +9738,7 @@ def computeTimeMasks_old15102025(epochs, chan, trial, json_data, do_plot=False, 
                     label=f'peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}')
         plt.axvline(x=offset, label=f'maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}')
         plt.legend(loc='upper right')
-        plt.savefig(f'{experiment_dir}/2.detrend/test_maskTest_{sub}_{chan}_{trial}.png')
+        plt.savefig(f'{experiment_dir}/3.detrend/test_maskTest_{sub}_{chan}_{trial}.png')
         plt.close()
         
     maskOffset = np.logical_and(epochs.times>=json_data['detrend_minTimeWindowOffset'], 
@@ -5445,7 +9786,7 @@ def computeTimeMasks_old(epochs, chan, trial, do_plot=False, offset=0.20):
                     label=f'peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}')
         plt.axvline(x=offset, label=f'maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}')
         plt.legend(loc='upper right')
-        plt.savefig(f'{experiment_dir}/2.detrend/test/maskTest_{sub}_{chan}_{trial}.png')
+        plt.savefig(f'{experiment_dir}/3.detrend/test/maskTest_{sub}_{chan}_{trial}.png')
         plt.close()
         
     maskOffset = np.logical_and(epochs.times>=json_data['detrend_minTimeWindowOffset'], 
@@ -5615,7 +9956,7 @@ import numpy as np
 import pandas as pd
 
 def computeSlopesPlot_v3(df_slopes, sub,
-                         saveNote='ALL-TRIALS', sharex=True, subPath='2.detrend',
+                         saveNote='ALL-TRIALS', sharex=True, subPath='3.detrend',
                       zvalue=True, json_data=None, experiment_dir='.'):
     
     VAR = 'Zslope' if zvalue else 'slope'
@@ -5720,7 +10061,7 @@ import pandas as pd
 
 def computeSlopesPlot_v2(df_slopes,
                          sub,
-                         saveNote='ALL-TRIALS', sharex=True, subPath='2.detrend', zvalue=True, json_data=None, experiment_dir='.'):
+                         saveNote='ALL-TRIALS', sharex=True, subPath='3.detrend', zvalue=True, json_data=None, experiment_dir='.'):
     VAR = 'Zslope' if zvalue else 'slope'
     ntrial = df_slopes['id_trial'].nunique()
     timeMaskLabels = ['preOffset', 'offset', 'postOffset']
@@ -5802,7 +10143,7 @@ def computeSlopesPlot_v2(df_slopes,
 
 def computeSlopesPlot(df_slopes, 
                       json_data, experiment_dir, sub,
-                      saveNote='ALL-TRIALS', sharex=True, subPath='2.detrend', zvalue=True):
+                      saveNote='ALL-TRIALS', sharex=True, subPath='3.detrend', zvalue=True):
     
     VAR = 'Zslope' if zvalue else 'slope'
     ntrial = df_slopes['id_trial'].nunique()
@@ -5884,7 +10225,158 @@ def computeSlopesPlot(df_slopes,
 
     return df_anova_results
 
-def generate_noise_from_distribution(time_series, model='Gaussian', n_samples=1000):
+
+def generate_noise_from_distribution(
+    time_series,
+    model="Gaussian",
+    n_samples=1000,
+    rng=None
+):
+    import numpy as np
+
+    if rng is None:
+        rng=np.random.default_rng(42)
+
+    x=np.asarray(
+        time_series,
+        dtype=float
+    ).ravel()
+
+    x=x[
+        np.isfinite(x)
+    ]
+
+    if x.size==0:
+        return np.zeros(
+            n_samples,
+            dtype=float
+        )
+
+    mean=float(
+        np.mean(x)
+    )
+
+    std=float(
+        np.std(x)*0.5
+    )
+
+    median=float(
+        np.median(x)
+    )
+
+    minimum=float(
+        np.min(x)
+    )
+
+    maximum=float(
+        np.max(x)
+    )
+
+    epsilon=1e-8
+    std=max(
+        std,
+        epsilon
+    )
+
+    if not np.isfinite(minimum) or not np.isfinite(maximum):
+        minimum=mean-std
+        maximum=mean+std
+
+    if minimum==maximum:
+        minimum-=std
+        maximum+=std
+
+    if minimum>maximum:
+        minimum,maximum=maximum,minimum
+
+    model_name=str(
+        model
+    ).strip().lower()
+
+    if model_name=="gaussian":
+        return rng.normal(
+            loc=mean,
+            scale=std,
+            size=n_samples
+        )
+
+    if model_name=="exponential":
+        return rng.exponential(
+            scale=max(std,epsilon),
+            size=n_samples
+        )
+
+    if model_name=="laplace":
+        return rng.laplace(
+            loc=median,
+            scale=std,
+            size=n_samples
+        )
+
+    if model_name=="poisson":
+        return rng.poisson(
+            lam=max(mean,0.0),
+            size=n_samples
+        )
+
+    if model_name=="rayleigh":
+        return rng.rayleigh(
+            scale=std,
+            size=n_samples
+        )
+
+    if model_name=="gamma":
+        shape=(
+            mean**2/std**2
+            if std>epsilon
+            else 1.0
+        )
+
+        shape=max(
+            shape,
+            epsilon
+        )
+
+        scale=(
+            std**2
+            /max(
+                abs(mean),
+                epsilon
+            )
+        )
+
+        return rng.gamma(
+            shape=shape,
+            scale=scale,
+            size=n_samples
+        )
+
+    if model_name in (
+        "studentt",
+        "student_t",
+        "t"
+    ):
+        return (
+            rng.standard_t(
+                df=2.0,
+                size=n_samples
+            )
+            *std
+            +mean
+        )
+
+    if model_name=="uniform":
+        return rng.uniform(
+            low=minimum,
+            high=maximum,
+            size=n_samples
+        )
+
+    raise ValueError(
+        f"Modello non supportato: {model}"
+    ) 
+
+def generate_noise_from_distribution_old01082026(time_series, model='Gaussian', n_samples=1000):
     x=np.asarray(time_series).ravel()
     x=x[~np.isnan(x)]
     if x.size==0: return np.zeros(n_samples,dtype=float)
@@ -6000,6 +10492,27 @@ def computeDetrend_v6(EPOCHS,
     
     from scipy.optimize import curve_fit
     import numpy as np
+
+
+    base_seed=int(
+        json_data.get(
+            "detrend_noise_seed",
+            42
+        )
+    )
+    
+    json_data[
+        "detrend_noise_seed"
+    ]=base_seed
+    
+    json_data[
+        "detrend_noise_generator"
+    ]="numpy.random.default_rng"
+    
+    json_data[
+        "detrend_noise_seed_strategy"
+    ]="SeedSequence(base_seed,channel_index,epoch_index)"
+
     
     # POLY
     def poly_func(x, *coeffs):
@@ -6402,14 +10915,44 @@ def computeDetrend_v6(EPOCHS,
     PROB = nplot/totplot
     print('p plot', PROB)
 
-    for chan in tqdm(EPOCHS.ch_names):
 
-        if doDetrendOnlyOffsetChans and chan not in offsetChans:
+    for chan in tqdm(
+        EPOCHS.ch_names
+    ):
+        if (
+            doDetrendOnlyOffsetChans
+            and chan not in offsetChans
+        ):
             continue  # salta questo canale, mantiene i dati originali
+    
+        id_chan=int(
+            np.where(
+                np.asarray(
+                    EPOCHS.ch_names
+                )==chan
+            )[0][0]
+        )
+    
+        for epoch_idx in range(
+            data_detrended.shape[0]
+        ):
+            rng=np.random.default_rng(
+                np.random.SeedSequence([
+                    base_seed,
+                    int(id_chan),
+                    int(epoch_idx)
+                ])
+            )
+    
+            tep=data_detrended[
+                epoch_idx,
+                id_chan,
+                :
+            ].reshape(
+                -1,
+                1
+            )
 
-        id_chan = np.where(np.array(EPOCHS.ch_names) == chan)[0][0]
-        for epoch_idx in range(data_detrended.shape[0]):
-            tep = data_detrended[epoch_idx, id_chan, :].reshape(-1, 1)
             #print("len(tep) =", len(tep))
             #assert len(tep) == len(times), f"len(tep)={len(tep)} len(times)={len(times)}"
             
@@ -6488,7 +11031,7 @@ def computeDetrend_v6(EPOCHS,
                 if lag_correction:
                     tep_agg_shifted, n_shift = shift_signal_by_mask(tep_agg, timeMask[1])
                 if correctMode!=False:
-                    tep_agg = apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models)
+                    tep_agg = apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models, rng=rng)
                 data_detrended[epoch_idx, id_chan, :] = tep_agg
                 is_marker = chan in markerChans
                 plot_detrend_example_v3(
@@ -6764,7 +11307,7 @@ def computeDetrend_v6(EPOCHS,
                 tep_agg_shifted, n_shift = shift_signal_by_mask(tep_agg, timeMask[1])
             ######################################################################################
             if correctMode!=False:
-                tep_agg = apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models)
+                tep_agg = apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models, rng=rng)
             ######################################################################################            
             data_detrended[epoch_idx, id_chan, :] = tep_agg
             ######################################################################################            
@@ -6804,7 +11347,7 @@ def computeDetrend_v6(EPOCHS,
         tabStat,
         columns=['chan', 'epoch_idx', 'mseA', 'mseB', 'mseC', 'OPTPARS_A', 'OPTPARS_B', 'OPTPARS_C']
     )
-    tabStat_path = os.path.join(experiment_dir, '2.detrend', f'tabStatDetrend_{typeOffsetDecay}.csv')
+    tabStat_path = os.path.join(experiment_dir, '3.detrend', f'tabStatDetrend_{typeOffsetDecay}.csv')
     df_tabStat.to_csv(tabStat_path, index=False)
     print(f"[INFO] Salvato tabStat in: {tabStat_path}")
 
@@ -6874,7 +11417,7 @@ def plot_detrend_example_v3(sub,
 
     ax[0].legend(loc='upper left', bbox_to_anchor=(-0.65 if len(ax) > 2 else -1, 1), borderaxespad=0.)
     plt.tight_layout()
-    out_path = os.path.join(experiment_dir, '2.detrend', 'examples', filename)
+    out_path = os.path.join(experiment_dir, '3.detrend', 'examples', filename)
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
 
@@ -6962,7 +11505,7 @@ def plot_detrend_example(sub, chan, epoch_idx, times, TEP, trend_line_A, trend_l
 
     ax[0].legend(loc='upper left', bbox_to_anchor=(-0.65 if len(ax) > 2 else -1, 1), borderaxespad=0.)
     plt.tight_layout()
-    out_path = os.path.join(experiment_dir, '2.detrend', 'examples', filename)
+    out_path = os.path.join(experiment_dir, '3.detrend', 'examples', filename)
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
 
@@ -6974,7 +11517,7 @@ import seaborn as sns
 
 def plot_tabStat(df_tabStat, experiment_dir):
     # Crea la cartella per i plot
-    output_dir = os.path.join(experiment_dir, '2.detrend', 'statDetrend')
+    output_dir = os.path.join(experiment_dir, '3.detrend', 'statDetrend')
     os.makedirs(output_dir, exist_ok=True)
 
     # Assicurati che la colonna totale esista
@@ -7032,7 +11575,208 @@ def plot_tabStat(df_tabStat, experiment_dir):
     print(f"[INFO] Plot salvati in: {output_dir}")
 
 
-def apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models):
+def apply_offset_correction(
+    tep_agg,
+    tep,
+    timeMask,
+    correctMode,
+    oddSamples,
+    EPOCHS,
+    supported_models,
+    rng=None
+):
+    import numpy as np
+    from scipy.signal import resample
+
+    if rng is None:
+        rng=np.random.default_rng(42)
+
+    tep_agg=np.asarray(
+        tep_agg,
+        dtype=float
+    ).copy()
+
+    tep=np.asarray(
+        tep,
+        dtype=float
+    ).reshape(-1)
+
+    times=np.asarray(
+        EPOCHS.times,
+        dtype=float
+    )
+
+    odd_samples_ms=(
+        0.0
+        if oddSamples is None or oddSamples is False
+        else float(oddSamples)
+    )
+
+    margin_seconds=(
+        odd_samples_ms
+        /1000.0
+    )
+
+    pre_indices=np.flatnonzero(
+        timeMask[0]
+    )
+
+    offset_indices=np.flatnonzero(
+        timeMask[1]
+    )
+
+    if (
+        pre_indices.size==0
+        or offset_indices.size==0
+    ):
+        return tep_agg
+
+    pre_end_time=float(
+        times[
+            pre_indices[-1]
+        ]
+    )
+
+    offset_start_time=float(
+        times[
+            offset_indices[0]
+        ]
+    )
+
+    offset_end_time=float(
+        times[
+            offset_indices[-1]
+        ]
+    )
+
+    precorrectionMask=(
+        (times>=float(times[pre_indices[0]]))
+        &(times<=pre_end_time-margin_seconds)
+    )
+
+    if not np.any(
+        precorrectionMask
+    ):
+        precorrectionMask=timeMask[
+            0
+        ].copy()
+
+    correctionMask=(
+        (times>=offset_start_time-margin_seconds)
+        &(times<=offset_end_time+margin_seconds)
+    )
+
+    num_samples=int(
+        np.sum(
+            correctionMask
+        )
+    )
+
+    pre_series=tep[
+        precorrectionMask
+    ]
+
+    pre_series=pre_series[
+        np.isfinite(
+            pre_series
+        )
+    ]
+
+    if (
+        num_samples==0
+        or pre_series.size==0
+    ):
+        return tep_agg
+
+    mode=(
+        str(correctMode).strip()
+        if correctMode is not False
+        else ""
+    )
+
+    mode_lower=mode.lower()
+
+    supported_lower={
+        str(item).lower()
+        for item in supported_models
+    }
+
+    if mode_lower=="moving_average":
+        window_size=max(
+            1,
+            int(
+                round(
+                    odd_samples_ms
+                )
+            )
+        )
+
+        if pre_series.size>=window_size:
+            value=float(
+                np.mean(
+                    pre_series[
+                        -window_size:
+                    ]
+                )
+            )
+        else:
+            value=float(
+                np.mean(
+                    pre_series
+                )
+            )
+
+        new_samples=np.full(
+            num_samples,
+            value,
+            dtype=float
+        )
+
+    elif mode_lower=="median":
+        new_samples=np.full(
+            num_samples,
+            float(
+                np.median(
+                    pre_series
+                )
+            ),
+            dtype=float
+        )
+
+    elif mode_lower=="zeros":
+        new_samples=np.zeros(
+            num_samples,
+            dtype=float
+        )
+
+    elif mode_lower=="resample":
+        new_samples=resample(
+            pre_series,
+            num=num_samples
+        )
+
+    elif mode_lower in supported_lower:
+        new_samples=generate_noise_from_distribution(
+            time_series=pre_series,
+            model=mode,
+            n_samples=num_samples,
+            rng=rng
+        )
+
+    else:
+        raise ValueError(
+            f"Metodo di correzione offset "
+            f"non riconosciuto: {correctMode}"
+        )
+
+    tep_agg[
+        correctionMask
+    ]=new_samples
+
+    return tep_agg
+
+
+def apply_offset_correction_oldB01082026(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models):
     # lunghezze nei dati originali
     n_pre  = int(np.count_nonzero(timeMask[0]))
     n_off  = int(np.count_nonzero(timeMask[1]))
@@ -7094,7 +11838,7 @@ def apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPO
     return tep_agg
 
 
-def apply_offset_correction(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models):
+def apply_offset_correction_oldA01082026(tep_agg, tep, timeMask, correctMode, oddSamples, EPOCHS, supported_models):
     k = oddSamples / 1000  # da ms a secondi
 
     times = EPOCHS.times
@@ -7188,7 +11932,7 @@ def apply_offset_correction_old15102025(tep_agg, tep, timeMask, correctMode, odd
 
 
 
-def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPath='2.detrend'):
+def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPath='3.detrend'):
 
     neural_params_dfs = []
     offset_params_dfs = []
@@ -7517,487 +12261,6 @@ def finalize_notes(json_data,experiment_dir,sub,status="completed"):
         file.write("="*80+"\n")
 
     return notes_path
-
-
-
-def compute_tep_natural_frequency(
-    postICA_final,
-    roi_channels,
-    json_data,
-    experiment_dir,
-    sub,
-    fmin=None,
-    fmax=None,
-    baseline_window_ms=None,
-    response_window_ms=None,
-    width=None,
-    save=True
-):
-    import json
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    from pathlib import Path
-    from mne.time_frequency import tfr_array_stockwell
-
-    sub=str(sub).strip()
-
-    fmin=float(
-        json_data.get(
-            "tep_nf_fmin",
-            4.0 if fmin is None else fmin
-        )
-    )
-
-    fmax=float(
-        json_data.get(
-            "tep_nf_fmax",
-            45.0 if fmax is None else fmax
-        )
-    )
-
-    width=float(
-        json_data.get(
-            "tep_nf_stockwell_width",
-            0.7 if width is None else width
-        )
-    )
-
-    baseline_window_ms=tuple(
-        json_data.get(
-            "tep_nf_baseline_window_ms",
-            (-100,-10)
-            if baseline_window_ms is None
-            else baseline_window_ms
-        )
-    )
-
-    response_window_ms=tuple(
-        json_data.get(
-            "tep_nf_response_window_ms",
-            (20,120)
-            if response_window_ms is None
-            else response_window_ms
-        )
-    )
-
-    roi_channels=[
-        channel
-        for channel in roi_channels
-        if channel in postICA_final.ch_names
-    ]
-
-    if not roi_channels:
-        raise ValueError(
-            "Nessun canale ROI disponibile per la Natural Frequency."
-        )
-
-    evoked=(
-        postICA_final
-        .copy()
-        .pick(roi_channels)
-        .average()
-    )
-
-    data=np.asarray(
-        evoked.get_data(),
-        dtype=float
-    )
-
-    times_ms=np.asarray(
-        evoked.times,
-        dtype=float
-    )*1000.0
-
-    sfreq=float(
-        evoked.info["sfreq"]
-    )
-
-    nyquist=sfreq/2.0
-    fmax=min(fmax,nyquist)
-
-    if fmin>=fmax:
-        raise ValueError(
-            f"Intervallo NF non valido: {fmin}-{fmax} Hz."
-        )
-
-    baseline_mask=(
-        (times_ms>=float(baseline_window_ms[0]))
-        &(times_ms<=float(baseline_window_ms[1]))
-    )
-
-    response_mask=(
-        (times_ms>=float(response_window_ms[0]))
-        &(times_ms<=float(response_window_ms[1]))
-    )
-
-    if np.sum(baseline_mask)<2:
-        raise ValueError(
-            f"Baseline NF {baseline_window_ms} ms non contenuta nei dati "
-            f"[{times_ms.min():.3f},{times_ms.max():.3f}] ms."
-        )
-
-    if np.sum(response_mask)<2:
-        raise ValueError(
-            f"Finestra NF {response_window_ms} ms non contenuta nei dati."
-        )
-
-    stockwell_input=data[np.newaxis,:,:]
-
-    stockwell_power,freqs=tfr_array_stockwell(
-        stockwell_input,
-        sfreq=sfreq,
-        fmin=fmin,
-        fmax=fmax,
-        width=width,
-        return_itc=False,
-        verbose=False
-    )
-
-    stockwell_power=np.asarray(
-        stockwell_power,
-        dtype=float
-    )
-
-    if stockwell_power.ndim!=3:
-        raise RuntimeError(
-            f"Shape Stockwell inattesa: {stockwell_power.shape}"
-        )
-
-    baseline_power=np.mean(
-        stockwell_power[:,:,baseline_mask],
-        axis=2,
-        keepdims=True
-    )
-
-    corrected_power=(
-        stockwell_power
-        -baseline_power
-    )
-
-    roi_tf_power=np.mean(
-        corrected_power,
-        axis=0
-    )
-
-    psd_evoked=np.sum(
-        roi_tf_power[:,response_mask],
-        axis=1
-    )
-
-    if not np.any(
-        np.isfinite(psd_evoked)
-    ):
-        raise RuntimeError(
-            "La PSD evocata non contiene valori validi."
-        )
-
-    nf_index=int(
-        np.nanargmax(
-            psd_evoked
-        )
-    )
-
-    natural_frequency_hz=float(
-        freqs[nf_index]
-    )
-
-    band_definitions={
-        "theta":(4.0,7.0),
-        "alpha":(8.0,13.0),
-        "beta1":(13.0,20.0),
-        "beta2":(20.0,30.0),
-        "gamma":(30.0,45.0)
-    }
-
-    band_power={}
-
-    for band_name,(band_min,band_max) in band_definitions.items():
-        mask=(
-            (freqs>=band_min)
-            &(freqs<band_max)
-        )
-
-        if np.sum(mask)<2:
-            band_power[band_name]=np.nan
-        else:
-            band_power[band_name]=float(
-                np.trapezoid(
-                    psd_evoked[mask],
-                    freqs[mask]
-                )
-            )
-
-    out_dir=(
-        Path(experiment_dir)
-        /"5.Extra"
-        /"FE"
-        /"Fingerprint"
-    )
-
-    out_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    spectrum_csv=(
-        out_dir
-        /f"{sub}_TEP_natural_frequency_spectrum.csv"
-    )
-
-    summary_json=(
-        out_dir
-        /f"{sub}_TEP_natural_frequency_summary.json"
-    )
-
-    spectrum_png=(
-        out_dir
-        /f"{sub}_TEP_natural_frequency_spectrum.png"
-    )
-
-    tf_png=(
-        out_dir
-        /f"{sub}_TEP_natural_frequency_stockwell.png"
-    )
-
-    reference={
-        "primary_reference":{
-            "citation":(
-                "Rosanova M, Casali A, Bellina V, Resta F, "
-                "Mariotti M, Massimini M. Natural Frequencies "
-                "of Human Corticothalamic Circuits. "
-                "Journal of Neuroscience. 2009;29:7679-7685."
-            ),
-            "doi":"10.1523/JNEUROSCI.0445-09.2009"
-        },
-        "clinical_reference":{
-            "citation":(
-                "Rosanova M, Fecchio M, Casarotto S, et al. "
-                "Sleep-like cortical OFF-periods disrupt causality "
-                "and complexity in the brain of unresponsive "
-                "wakefulness syndrome patients. "
-                "Nature Communications. 2018;9:4427."
-            ),
-            "doi":"10.1038/s41467-018-06871-1"
-        }
-    }
-
-    summary={
-        "subject":sub,
-        "subject_id":sub,
-        "natural_frequency_hz":natural_frequency_hz,
-        "roi_channels":list(roi_channels),
-        "fmin":fmin,
-        "fmax":fmax,
-        "stockwell_width":width,
-        "baseline_window_ms":[
-            float(baseline_window_ms[0]),
-            float(baseline_window_ms[1])
-        ],
-        "response_window_ms":[
-            float(response_window_ms[0]),
-            float(response_window_ms[1])
-        ],
-        "band_power":band_power,
-        "reference":reference
-    }
-
-    if save:
-        pd.DataFrame({
-            "subject":sub,
-            "frequency_hz":freqs,
-            "evoked_power":psd_evoked
-        }).to_csv(
-            spectrum_csv,
-            index=False
-        )
-
-        with open(
-            summary_json,
-            "w",
-            encoding="utf-8"
-        ) as file:
-            json.dump(
-                summary,
-                file,
-                indent=4,
-                ensure_ascii=False
-            )
-
-        fig,ax=plt.subplots(
-            figsize=(10,6)
-        )
-
-        ax.plot(
-            freqs,
-            psd_evoked,
-            linewidth=2
-        )
-
-        ax.axvline(
-            natural_frequency_hz,
-            linestyle="--",
-            linewidth=2,
-            label=f"NF={natural_frequency_hz:.2f} Hz"
-        )
-
-        ax.set_xlim(
-            fmin,
-            fmax
-        )
-
-        ax.set_xlabel(
-            "Frequency [Hz]"
-        )
-
-        ax.set_ylabel(
-            "Baseline-corrected evoked power"
-        )
-
-        ax.set_title(
-            f"{sub} TEP Natural Frequency\n"
-            f"ROI={roi_channels}"
-        )
-
-        ax.legend()
-        fig.tight_layout()
-
-        fig.savefig(
-            spectrum_png,
-            dpi=300,
-            bbox_inches="tight"
-        )
-
-        plt.close(fig)
-
-        fig,ax=plt.subplots(
-            figsize=(11,6)
-        )
-
-        image=ax.imshow(
-            roi_tf_power,
-            aspect="auto",
-            origin="lower",
-            extent=[
-                times_ms[0],
-                times_ms[-1],
-                freqs[0],
-                freqs[-1]
-            ]
-        )
-
-        ax.axvline(
-            0,
-            linestyle="--",
-            linewidth=1
-        )
-
-        ax.axvspan(
-            response_window_ms[0],
-            response_window_ms[1],
-            alpha=0.15
-        )
-
-        ax.axhline(
-            natural_frequency_hz,
-            linestyle="--",
-            linewidth=1
-        )
-
-        ax.set_xlabel(
-            "Time [ms]"
-        )
-
-        ax.set_ylabel(
-            "Frequency [Hz]"
-        )
-
-        ax.set_title(
-            f"{sub} Stockwell TEP power"
-        )
-
-        fig.colorbar(
-            image,
-            ax=ax,
-            label="Baseline-corrected power"
-        )
-
-        fig.tight_layout()
-
-        fig.savefig(
-            tf_png,
-            dpi=300,
-            bbox_inches="tight"
-        )
-
-        plt.close(fig)
-
-    json_data["TEP_natural_frequency_computed"]=True
-    json_data["TEP_natural_frequency_hz"]=natural_frequency_hz
-    json_data["TEP_natural_frequency_ROI_channels"]=list(
-        roi_channels
-    )
-    json_data["TEP_natural_frequency_band_power"]=band_power
-    json_data["TEP_natural_frequency_parameters"]={
-        "fmin":fmin,
-        "fmax":fmax,
-        "stockwell_width":width,
-        "baseline_window_ms":list(
-            baseline_window_ms
-        ),
-        "response_window_ms":list(
-            response_window_ms
-        )
-    }
-    json_data["TEP_natural_frequency_reference"]=reference
-    json_data["TEP_natural_frequency_primary_DOI"]=(
-        "10.1523/JNEUROSCI.0445-09.2009"
-    )
-    json_data["TEP_natural_frequency_clinical_DOI"]=(
-        "10.1038/s41467-018-06871-1"
-    )
-    json_data["TEP_natural_frequency_spectrum_csv"]=str(
-        spectrum_csv
-    )
-    json_data["TEP_natural_frequency_summary_json"]=str(
-        summary_json
-    )
-    json_data["TEP_natural_frequency_spectrum_png"]=str(
-        spectrum_png
-    )
-    json_data["TEP_natural_frequency_stockwell_png"]=str(
-        tf_png
-    )
-
-    print("✅ TEP Natural Frequency completata")
-    print(f"   Subject: {sub}")
-    print(f"   ROI channels: {roi_channels}")
-    print(f"   Natural Frequency: {natural_frequency_hz:.3f} Hz")
-    print(
-        "📚 Rosanova et al., Natural Frequencies of Human "
-        "Corticothalamic Circuits, J Neurosci, 2009"
-    )
-    print(
-        "🔗 DOI: 10.1523/JNEUROSCI.0445-09.2009"
-    )
-    print(
-        "📚 Rosanova et al., Sleep-like cortical OFF-periods "
-        "disrupt causality and complexity, Nat Commun, 2018"
-    )
-    print(
-        "🔗 DOI: 10.1038/s41467-018-06871-1"
-    )
-
-    return (
-        natural_frequency_hz,
-        psd_evoked,
-        freqs,
-        summary,
-        json_data
-    )
-
-
-
 
 
 
@@ -8949,15 +13212,3735 @@ def compute_tep_fingerprint(
 
 
 
+def compute_tep_random_trigger_pcist_null(
+    raw_continuous,
+    real_events,
+    reference_epochs,
+    json_data,
+    experiment_dir,
+    sub,
+    n_replicates=None,
+    random_seed=None,
+    exclusion_ms=None,
+    min_interval_ms=None,
+    save=True
+):
+    import json
+    import tempfile
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import mne
+    from pathlib import Path
+
+    n_replicates=int(
+        json_data.get(
+            "tep_random_pcist_replicates",
+            50 if n_replicates is None else n_replicates
+        )
+    )
+
+    random_seed=int(
+        json_data.get(
+            "tep_random_pcist_seed",
+            42 if random_seed is None else random_seed
+        )
+    )
+
+    exclusion_ms=float(
+        json_data.get(
+            "tep_random_pcist_exclusion_ms",
+            500.0 if exclusion_ms is None else exclusion_ms
+        )
+    )
+
+    min_interval_ms=float(
+        json_data.get(
+            "tep_random_pcist_min_interval_ms",
+            500.0 if min_interval_ms is None else min_interval_ms
+        )
+    )
+
+    raw=raw_continuous.copy().pick("eeg").load_data()
+
+    sfreq=float(raw.info["sfreq"])
+    n_times=int(raw.n_times)
+    first_samp=int(raw.first_samp)
+
+    tmin=float(reference_epochs.tmin)
+    tmax=float(reference_epochs.tmax)
+    n_events=int(len(reference_epochs))
+
+    if n_events<1:
+        raise ValueError(
+            "reference_epochs non contiene epoche."
+        )
+
+    start_margin=int(
+        np.ceil(
+            abs(tmin)*sfreq
+        )
+    )
+
+    stop_margin=int(
+        np.ceil(
+            tmax*sfreq
+        )
+    )
+
+    exclusion_samples=int(
+        round(
+            exclusion_ms*sfreq/1000.0
+        )
+    )
+
+    min_interval_samples=int(
+        round(
+            min_interval_ms*sfreq/1000.0
+        )
+    )
+
+    valid=np.ones(
+        n_times,
+        dtype=bool
+    )
+
+    valid[:start_margin]=False
+    valid[max(0,n_times-stop_margin):]=False
+
+    for annotation in raw.annotations:
+        if not str(
+            annotation["description"]
+        ).startswith("BAD"):
+            continue
+
+        start=int(
+            np.floor(
+                float(annotation["onset"])*sfreq
+            )
+        )-stop_margin
+
+        stop=int(
+            np.ceil(
+                (
+                    float(annotation["onset"])
+                    +float(annotation["duration"])
+                )*sfreq
+            )
+        )+start_margin
+
+        start=max(
+            0,
+            start
+        )
+
+        stop=min(
+            n_times,
+            stop
+        )
+
+        valid[start:stop]=False
+
+    real_event_samples=np.asarray(
+        real_events[:,0],
+        dtype=int
+    )-first_samp
+
+    for event_sample in real_event_samples:
+        start=max(
+            0,
+            event_sample-exclusion_samples
+        )
+
+        stop=min(
+            n_times,
+            event_sample+exclusion_samples+1
+        )
+
+        valid[start:stop]=False
+
+    candidate_samples=np.flatnonzero(
+        valid
+    )
+
+    if candidate_samples.size<n_events:
+        raise ValueError(
+            "Campioni validi insufficienti per generare "
+            f"{n_events} trigger casuali."
+        )
+
+    rng=np.random.default_rng(
+        random_seed
+    )
+
+    experiment_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
+    out_dir=(
+        experiment_dir
+        /"5.Extra"
+        /"FE"
+        /"PCIst"
+        /"RandomTriggers"
+    )
+
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    def sample_random_triggers():
+        shuffled=rng.permutation(
+            candidate_samples
+        )
+
+        selected=[]
+
+        for sample in shuffled:
+            if all(
+                abs(sample-existing)
+                >=min_interval_samples
+                for existing in selected
+            ):
+                selected.append(
+                    int(sample)
+                )
+
+                if len(selected)==n_events:
+                    break
+
+        if len(selected)<n_events:
+            raise RuntimeError(
+                "Impossibile generare abbastanza trigger casuali "
+                "rispettando la distanza minima."
+            )
+
+        return np.sort(
+            np.asarray(
+                selected,
+                dtype=int
+            )
+        )
+
+    rows=[]
+
+    for replicate in range(
+        n_replicates
+    ):
+        random_samples=sample_random_triggers()
+
+        random_events=np.column_stack([
+            random_samples+first_samp,
+            np.zeros(
+                n_events,
+                dtype=int
+            ),
+            np.full(
+                n_events,
+                999,
+                dtype=int
+            )
+        ])
+
+        random_epochs=mne.Epochs(
+            raw,
+            random_events,
+            event_id={"RANDOM_TRIGGER":999},
+            tmin=tmin,
+            tmax=tmax,
+            baseline=None,
+            detrend=None,
+            preload=True,
+            reject_by_annotation=True,
+            event_repeated="drop",
+            verbose=False
+        )
+
+        random_epochs=random_epochs.pick(
+            "eeg"
+        )
+
+        if len(random_epochs)==0:
+            rows.append({
+                "subject":str(sub),
+                "replicate":int(replicate+1),
+                "n_requested":int(n_events),
+                "n_kept":0,
+                "PCIst":np.nan,
+                "n_dims":np.nan,
+                "status":"no_epochs"
+            })
+
+            continue
+
+        with tempfile.TemporaryDirectory(
+            prefix=(
+                f"tep_random_pcist_"
+                f"{replicate+1:03d}_"
+            )
+        ) as temporary_directory:
+
+            try:
+                (
+                    pci_value,
+                    pci_result,
+                    _
+                )=compute_pcist(
+                    postICA_final=random_epochs,
+                    json_data=json_data.copy(),
+                    experiment_dir=temporary_directory,
+                    sub=(
+                        f"{sub}_RANDOM_TRIGGER_"
+                        f"{replicate+1:03d}"
+                    )
+                )
+
+                rows.append({
+                    "subject":str(sub),
+                    "replicate":int(replicate+1),
+                    "n_requested":int(n_events),
+                    "n_kept":int(len(random_epochs)),
+                    "PCIst":float(pci_value),
+                    "n_dims":int(
+                        pci_result["n_dims"]
+                    ),
+                    "first_trigger_sec":float(
+                        random_samples[0]/sfreq
+                    ),
+                    "last_trigger_sec":float(
+                        random_samples[-1]/sfreq
+                    ),
+                    "status":"ok"
+                })
+
+            except Exception as error:
+                rows.append({
+                    "subject":str(sub),
+                    "replicate":int(replicate+1),
+                    "n_requested":int(n_events),
+                    "n_kept":int(len(random_epochs)),
+                    "PCIst":np.nan,
+                    "n_dims":np.nan,
+                    "first_trigger_sec":float(
+                        random_samples[0]/sfreq
+                    ),
+                    "last_trigger_sec":float(
+                        random_samples[-1]/sfreq
+                    ),
+                    "status":repr(error)
+                })
+
+    df=pd.DataFrame(
+        rows
+    )
+
+    values=(
+        df["PCIst"]
+        .replace(
+            [np.inf,-np.inf],
+            np.nan
+        )
+        .dropna()
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    if values.size==0:
+        raise RuntimeError(
+            "Nessuna replica random-trigger PCIst valida."
+        )
+
+    observed_value=None
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="tep_observed_pcist_"
+        ) as temporary_directory:
+
+            (
+                observed_value,
+                observed_result,
+                _
+            )=compute_pcist(
+                postICA_final=reference_epochs,
+                json_data=json_data.copy(),
+                experiment_dir=temporary_directory,
+                sub=f"{sub}_OBSERVED"
+            )
+
+            observed_value=float(
+                observed_value
+            )
+
+    except Exception as error:
+        print(
+            f"⚠️ PCIst osservata non ricalcolata: {error}"
+        )
+
+    null_mean=float(
+        np.mean(values)
+    )
+
+    null_std=float(
+        np.std(
+            values,
+            ddof=1
+        )
+    ) if values.size>1 else 0.0
+
+    null_p95=float(
+        np.percentile(
+            values,
+            95
+        )
+    )
+
+    empirical_p=(
+        float(
+            (
+                1+np.sum(
+                    values>=observed_value
+                )
+            )/(
+                values.size+1
+            )
+        )
+        if observed_value is not None
+        else np.nan
+    )
+
+    summary={
+        "subject":str(sub),
+        "null_model":(
+            "Random trigger relocation on the unchanged "
+            "continuous TEP signal"
+        ),
+        "n_replicates_requested":int(
+            n_replicates
+        ),
+        "n_replicates_valid":int(
+            values.size
+        ),
+        "n_events_per_replicate":int(
+            n_events
+        ),
+        "random_seed":int(
+            random_seed
+        ),
+        "exclusion_from_real_triggers_ms":float(
+            exclusion_ms
+        ),
+        "minimum_random_trigger_interval_ms":float(
+            min_interval_ms
+        ),
+        "observed_pcist":observed_value,
+        "null_mean":null_mean,
+        "null_std":null_std,
+        "null_median":float(
+            np.median(values)
+        ),
+        "null_min":float(
+            np.min(values)
+        ),
+        "null_max":float(
+            np.max(values)
+        ),
+        "null_p95":null_p95,
+        "empirical_p_upper_tail":empirical_p
+    }
+
+    replicates_csv=(
+        out_dir
+        /f"{sub}_TEP_random_trigger_PCIst_replicates.csv"
+    )
+
+    summary_csv=(
+        out_dir
+        /f"{sub}_TEP_random_trigger_PCIst_summary.csv"
+    )
+
+    summary_json=(
+        out_dir
+        /f"{sub}_TEP_random_trigger_PCIst_summary.json"
+    )
+
+    values_npy=(
+        out_dir
+        /f"{sub}_TEP_random_trigger_PCIst_values.npy"
+    )
+
+    figure_png=(
+        out_dir
+        /f"{sub}_TEP_random_trigger_PCIst_distribution.png"
+    )
+
+    if save:
+        df.to_csv(
+            replicates_csv,
+            index=False
+        )
+
+        pd.DataFrame([
+            summary
+        ]).to_csv(
+            summary_csv,
+            index=False
+        )
+
+        with open(
+            summary_json,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                summary,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        np.save(
+            values_npy,
+            values
+        )
+
+        fig,ax=plt.subplots(
+            figsize=(9,6)
+        )
+
+        ax.hist(
+            values,
+            bins=min(
+                20,
+                max(
+                    5,
+                    int(
+                        np.sqrt(
+                            values.size
+                        )
+                    )
+                )
+            )
+        )
+
+        ax.axvline(
+            null_mean,
+            linestyle="--",
+            linewidth=2,
+            label=f"Null mean={null_mean:.3f}"
+        )
+
+        ax.axvline(
+            null_p95,
+            linestyle=":",
+            linewidth=2,
+            label=f"Null p95={null_p95:.3f}"
+        )
+
+        if observed_value is not None:
+            ax.axvline(
+                observed_value,
+                linewidth=3,
+                label=f"Observed={observed_value:.3f}"
+            )
+
+        ax.set_xlabel(
+            "PCIst"
+        )
+
+        ax.set_ylabel(
+            "Random-trigger replicates"
+        )
+
+        ax.set_title(
+            f"{sub} TEP random-trigger PCIst null"
+        )
+
+        ax.legend()
+        fig.tight_layout()
+
+        fig.savefig(
+            figure_png,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig)
+
+    json_data[
+        "TEP_random_trigger_PCIst_computed"
+    ]=True
+
+    json_data[
+        "TEP_random_trigger_PCIst_replicates"
+    ]=int(
+        n_replicates
+    )
+
+    json_data[
+        "TEP_random_trigger_PCIst_seed"
+    ]=int(
+        random_seed
+    )
+
+    json_data[
+        "TEP_random_trigger_PCIst_null_mean"
+    ]=null_mean
+
+    json_data[
+        "TEP_random_trigger_PCIst_null_std"
+    ]=null_std
+
+    json_data[
+        "TEP_random_trigger_PCIst_null_p95"
+    ]=null_p95
+
+    json_data[
+        "TEP_random_trigger_PCIst_observed"
+    ]=observed_value
+
+    json_data[
+        "TEP_random_trigger_PCIst_empirical_p"
+    ]=empirical_p
+
+    json_data[
+        "TEP_random_trigger_PCIst_output_dir"
+    ]=str(
+        out_dir
+    )
+
+    print(
+        "✅ TEP random-trigger PCIst null completata"
+    )
+    print(
+        f"   Segnale continuo invariato"
+    )
+    print(
+        f"   Trigger reali esclusi ±{exclusion_ms:.1f} ms"
+    )
+    print(
+        f"   Eventi per replica: {n_events}"
+    )
+    print(
+        f"   Repliche valide: {values.size}"
+    )
+    print(
+        f"   Null PCIst: {null_mean:.3f} ± {null_std:.3f}"
+    )
+    print(
+        f"   Null p95: {null_p95:.3f}"
+    )
+    print(
+        f"   Observed: {observed_value}"
+    )
+    print(
+        f"   Empirical p: {empirical_p}"
+    )
+
+    return df,summary,values,json_data
+
+from pathlib import Path
+import numpy as np
+import mne
+
+try:
+    from scipy.signal import find_peaks
+except Exception:
+    find_peaks=None
+
+def _auto_joint_times(evoked,tmin=0.02,tmax=0.30,n_peaks=4,min_distance_ms=20,picks="eeg"):
+    evo=evoked.copy().pick(picks)
+    times=evo.times
+    mask=(times>=tmin)&(times<=tmax)
+    if not np.any(mask):
+        raise ValueError("Nessun campione nella finestra richiesta per selezionare i picchi.")
+    data=evo.data[:,mask]
+    gfp=np.std(data,axis=0)
+    sfreq=float(evo.info["sfreq"])
+    min_distance=max(1,int(round(min_distance_ms*sfreq/1000.0)))
+    if find_peaks is not None:
+        peaks,_=find_peaks(gfp,distance=min_distance)
+    else:
+        peaks=np.array([],dtype=int)
+    if len(peaks)==0:
+        idx_sorted=np.argsort(gfp)[::-1]
+        chosen=[]
+        for idx in idx_sorted:
+            if all(abs(idx-c)>=min_distance for c in chosen):
+                chosen.append(idx)
+            if len(chosen)>=n_peaks:
+                break
+        peaks=np.array(sorted(chosen),dtype=int)
+    else:
+        peaks=peaks[np.argsort(gfp[peaks])[::-1]]
+        chosen=[]
+        for idx in peaks:
+            if all(abs(idx-c)>=min_distance for c in chosen):
+                chosen.append(idx)
+            if len(chosen)>=n_peaks:
+                break
+        peaks=np.array(sorted(chosen),dtype=int)
+    if len(peaks)<n_peaks:
+        idx_sorted=np.argsort(gfp)[::-1]
+        chosen=list(peaks)
+        for idx in idx_sorted:
+            if all(abs(idx-c)>=min_distance for c in chosen):
+                chosen.append(idx)
+            if len(chosen)>=n_peaks:
+                break
+        peaks=np.array(sorted(chosen[:n_peaks]),dtype=int)
+    sel_times=times[mask][peaks]
+    return [float(x) for x in sel_times[:n_peaks]]
+
+
+def plot_postica_joint(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+    subPath,
+    saveNote="postICA_final",
+    joint_times=None,
+    figsize=(16,10),
+    dpi=300
+):
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    output_dir=Path(experiment_dir)/subPath
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    plot_tmin,plot_tmax=get_epoch_plot_limits(
+        postICA_final,
+        json_data
+    )
+
+    evoked_joint=(
+        postICA_final
+        .average()
+        .copy()
+        .crop(
+            tmin=plot_tmin,
+            tmax=plot_tmax,
+            include_tmax=True
+        )
+    )
+
+    if joint_times is None:
+        joint_times=json_data.get(
+            "postICA_joint_plot_times_s",
+            [
+                0.025,
+                0.076,
+                0.127,
+                0.216
+            ]
+        )
+
+    joint_times=[
+        float(time)
+        for time in joint_times
+        if plot_tmin<=float(time)<=plot_tmax
+    ]
+
+    if len(joint_times)==0:
+        response_times=[
+            time
+            for time in evoked_joint.times
+            if max(0.0,plot_tmin)<=time<=plot_tmax
+        ]
+
+        if len(response_times)==0:
+            response_times=list(
+                evoked_joint.times
+            )
+
+        n_maps=min(
+            4,
+            len(response_times)
+        )
+
+        indices=[
+            int(index)
+            for index in __import__("numpy").linspace(
+                0,
+                len(response_times)-1,
+                n_maps
+            )
+        ]
+
+        joint_times=[
+            float(response_times[index])
+            for index in indices
+        ]
+
+    fig=evoked_joint.plot_joint(
+        times=joint_times,
+        picks="eeg",
+        show=False,
+        ts_args={
+            "spatial_colors":True,
+            "time_unit":"s"
+        },
+        topomap_args={
+            "time_unit":"s",
+            "contours":6,
+            "sensors":True
+        }
+    )
+
+    fig.set_size_inches(
+        figsize[0],
+        figsize[1]
+    )
+
+    for axis in fig.axes:
+        xlabel=str(
+            axis.get_xlabel()
+        ).lower()
+
+        if (
+            "time" in xlabel
+            or len(axis.lines)>1
+        ):
+            try:
+                axis.set_xlim(
+                    plot_tmin,
+                    plot_tmax
+                )
+            except Exception:
+                pass
+
+    output_path=(
+        output_dir
+        /f"{sub}_{saveNote}_joint_plot.png"
+    )
+
+    fig.savefig(
+        output_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(fig)
+
+    json_data[
+        "postICA_joint_plot"
+    ]=str(output_path)
+
+    json_data[
+        "postICA_joint_plot_tmin_s"
+    ]=float(plot_tmin)
+
+    json_data[
+        "postICA_joint_plot_tmax_s"
+    ]=float(plot_tmax)
+
+    json_data[
+        "postICA_joint_plot_times_s"
+    ]=[
+        float(time)
+        for time in joint_times
+    ]
+
+    print(
+        "✅ Post-ICA joint plot: "
+        f"{output_path}"
+    )
+
+    print(
+        "   Plot window: "
+        f"{plot_tmin*1000:.1f}–"
+        f"{plot_tmax*1000:.1f} ms"
+    )
+
+    print(
+        "   Topomap times:",
+        joint_times
+    )
+
+    return str(output_path),json_data
 
 
 
 
+def save_final_joint_plot(
+    epochs,
+    output_dir,
+    subject,
+    json_data,
+    times=None,
+    n_peaks=4,
+    peak_tmin=0.020,
+    peak_tmax=0.300,
+    min_distance_ms=30,
+    dpi=300
+):
+    from pathlib import Path
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import mne
+
+    output_dir=Path(output_dir)
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    if isinstance(epochs,mne.Evoked):
+        evoked=epochs.copy()
+
+    elif isinstance(epochs,mne.BaseEpochs):
+        evoked=epochs.copy().average()
+
+    else:
+        raise TypeError(
+            "epochs deve essere mne.Epochs oppure mne.Evoked."
+        )
+
+    evoked.pick("eeg")
+
+    data_tmin=float(
+        evoked.times.min()
+    )
+
+    data_tmax=float(
+        evoked.times.max()
+    )
+
+    plot_tmin=max(
+        float(
+            json_data.get(
+                "epochs_plot_timewindow_min",
+                data_tmin
+            )
+        ),
+        data_tmin
+    )
+
+    plot_tmax=min(
+        float(
+            json_data.get(
+                "epochs_plot_timewindow_max",
+                data_tmax
+            )
+        ),
+        data_tmax
+    )
+
+    if plot_tmin>=plot_tmax:
+        raise ValueError(
+            f"Finestra grafica non valida: "
+            f"[{plot_tmin},{plot_tmax}] s."
+        )
+
+    evoked_plot=evoked.copy().crop(
+        tmin=plot_tmin,
+        tmax=plot_tmax,
+        include_tmax=True
+    )
+
+    valid_peak_tmin=max(
+        float(peak_tmin),
+        plot_tmin
+    )
+
+    valid_peak_tmax=min(
+        float(peak_tmax),
+        plot_tmax
+    )
+
+    if valid_peak_tmin>=valid_peak_tmax:
+        valid_peak_tmin=max(
+            0.0,
+            plot_tmin
+        )
+
+        valid_peak_tmax=plot_tmax
+
+    if times is None:
+        mask=(
+            (evoked_plot.times>=valid_peak_tmin)
+            &(evoked_plot.times<=valid_peak_tmax)
+        )
+
+        candidate_times=evoked_plot.times[
+            mask
+        ]
+
+        if candidate_times.size==0:
+            raise ValueError(
+                "Nessun campione nella finestra di selezione topomap."
+            )
+
+        gfp=np.std(
+            evoked_plot.data[:,mask],
+            axis=0
+        )
+
+        min_distance_samples=max(
+            1,
+            int(
+                round(
+                    min_distance_ms
+                    *float(evoked_plot.info["sfreq"])
+                    /1000.0
+                )
+            )
+        )
+
+        order=np.argsort(
+            gfp
+        )[::-1]
+
+        selected_indices=[]
+
+        for index in order:
+            if all(
+                abs(
+                    int(index)-int(previous)
+                )>=min_distance_samples
+                for previous in selected_indices
+            ):
+                selected_indices.append(
+                    int(index)
+                )
+
+            if len(selected_indices)>=n_peaks:
+                break
+
+        selected_indices=sorted(
+            selected_indices
+        )
+
+        times=[
+            float(
+                candidate_times[index]
+            )
+            for index in selected_indices
+        ]
+
+    else:
+        times=[
+            float(time)
+            for time in times
+            if plot_tmin<=float(time)<=plot_tmax
+        ]
+
+    if not times:
+        raise ValueError(
+            "Nessun tempo valido disponibile per plot_joint."
+        )
+
+    fig=evoked_plot.plot_joint(
+        times=times,
+        title=(
+            f"{subject} — EEG "
+            f"({len(evoked_plot.ch_names)} channels)"
+        ),
+        show=False,
+        ts_args={
+            "spatial_colors":True,
+            "gfp":False,
+            "time_unit":"s"
+        },
+        topomap_args={
+            "sensors":True,
+            "contours":6,
+            "time_unit":"s"
+        }
+    )
+
+    if isinstance(fig,(list,tuple)):
+        fig=fig[0]
+
+    fig.set_size_inches(
+        16,
+        10
+    )
+
+    for axis in fig.axes:
+        xlabel=str(
+            axis.get_xlabel()
+        ).lower()
+
+        if "time" in xlabel:
+            axis.set_xlim(
+                plot_tmin,
+                plot_tmax
+            )
+
+    output_path=(
+        output_dir
+        /f"{subject}_postICA_final_joint_plot.png"
+    )
+
+    fig.savefig(
+        output_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(fig)
+
+    return (
+        output_path,
+        times,
+        plot_tmin,
+        plot_tmax
+    )
 
 
+def update_pkl_hashes(
+    postICA_final,
+    json_data,
+    experiment_dir
+):
+    from pathlib import Path
+    from datetime import datetime
+    import hashlib
+    import numpy as np
+    import mne
+
+    root=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
+    def sha256_file(
+        file_path,
+        chunk_size=1024*1024
+    ):
+        digest=hashlib.sha256()
+
+        with open(
+            file_path,
+            "rb"
+        ) as file:
+            while True:
+                chunk=file.read(
+                    chunk_size
+                )
+
+                if not chunk:
+                    break
+
+                digest.update(
+                    chunk
+                )
+
+        return digest.hexdigest()
+
+    def sha256_array(
+        array,
+        dtype=np.float64
+    ):
+        array=np.ascontiguousarray(
+            array,
+            dtype=dtype
+        )
+
+        return hashlib.sha256(
+            array.tobytes()
+        ).hexdigest()
+
+    pkl_files=sorted(
+        path
+        for path in root.rglob(
+            "*.pkl"
+        )
+        if path.is_file()
+    )
+
+    pkl_hashes={}
+
+    for pkl_path in pkl_files:
+        relative_path=str(
+            pkl_path.relative_to(
+                root
+            )
+        )
+
+        try:
+            stat=pkl_path.stat()
+
+            pkl_hashes[
+                relative_path
+            ]={
+                "sha256":sha256_file(
+                    pkl_path
+                ),
+                "size_bytes":int(
+                    stat.st_size
+                ),
+                "modified_time":datetime.fromtimestamp(
+                    stat.st_mtime
+                ).isoformat(),
+                "absolute_path":str(
+                    pkl_path
+                )
+            }
+
+        except Exception as error:
+            pkl_hashes[
+                relative_path
+            ]={
+                "sha256":None,
+                "size_bytes":None,
+                "modified_time":None,
+                "absolute_path":str(
+                    pkl_path
+                ),
+                "error":str(
+                    error
+                )
+            }
+
+    collection_digest=hashlib.sha256()
+
+    for relative_path in sorted(
+        pkl_hashes
+    ):
+        file_hash=pkl_hashes[
+            relative_path
+        ].get(
+            "sha256"
+        )
+
+        if file_hash is None:
+            continue
+
+        collection_digest.update(
+            relative_path.encode(
+                "utf-8"
+            )
+        )
+
+        collection_digest.update(
+            file_hash.encode(
+                "ascii"
+            )
+        )
+
+    json_data[
+        "pkl_hash_algorithm"
+    ]="SHA-256"
+
+    json_data[
+        "pkl_hashes"
+    ]=pkl_hashes
+
+    json_data[
+        "pkl_hashes_count"
+    ]=int(
+        len(pkl_hashes)
+    )
+
+    json_data[
+        "pkl_collection_sha256"
+    ]=collection_digest.hexdigest()
+
+    json_data[
+        "pkl_hashes_updated_at"
+    ]=datetime.now().isoformat()
+
+    json_data.pop(
+        "pkl_hash_manifest",
+        None
+    )
+
+    if isinstance(
+        postICA_final,
+        mne.BaseEpochs
+    ):
+        final_data=postICA_final.get_data()
+
+        selection=getattr(
+            postICA_final,
+            "selection",
+            np.arange(
+                len(postICA_final)
+            )
+        )
+
+        json_data[
+            "postICA_final_object_type"
+        ]=type(
+            postICA_final
+        ).__name__
+
+        json_data[
+            "postICA_final_data_sha256"
+        ]=sha256_array(
+            final_data
+        )
+
+        json_data[
+            "postICA_final_selection_sha256"
+        ]=sha256_array(
+            selection,
+            dtype=np.int64
+        )
+
+        json_data[
+            "postICA_final_data_shape"
+        ]=[
+            int(value)
+            for value in final_data.shape
+        ]
+
+        json_data[
+            "postICA_final_n_epochs"
+        ]=int(
+            len(postICA_final)
+        )
+
+    elif isinstance(
+        postICA_final,
+        mne.Evoked
+    ):
+        final_data=postICA_final.data
+
+        json_data[
+            "postICA_final_object_type"
+        ]=type(
+            postICA_final
+        ).__name__
+
+        json_data[
+            "postICA_final_data_sha256"
+        ]=sha256_array(
+            final_data
+        )
+
+        json_data[
+            "postICA_final_selection_sha256"
+        ]=None
+
+        json_data[
+            "postICA_final_data_shape"
+        ]=[
+            int(value)
+            for value in final_data.shape
+        ]
+
+    else:
+        raise TypeError(
+            "postICA_final deve essere "
+            "mne.Epochs oppure mne.Evoked."
+        )
+
+    json_data[
+        "postICA_final_sfreq"
+    ]=float(
+        postICA_final.info["sfreq"]
+    )
+
+    json_data[
+        "postICA_final_tmin"
+    ]=float(
+        postICA_final.times[0]
+    )
+
+    json_data[
+        "postICA_final_tmax"
+    ]=float(
+        postICA_final.times[-1]
+    )
+
+    json_data[
+        "postICA_final_channels"
+    ]=list(
+        postICA_final.ch_names
+    )
+
+    json_data[
+        "postICA_final_bads"
+    ]=list(
+        postICA_final.info.get(
+            "bads",
+            []
+        )
+    )
+
+    print(
+        f"✅ PKL hashes aggiornati: "
+        f"{len(pkl_hashes)} file"
+    )
+
+    for relative_path,information in pkl_hashes.items():
+        file_hash=information.get(
+            "sha256"
+        )
+
+        if file_hash is None:
+            print(
+                f"   {relative_path}: ERROR"
+            )
+        else:
+            print(
+                f"   {relative_path}: "
+                f"{file_hash[:16]}..."
+            )
+
+    print(
+        "✅ PKL collection SHA-256:",
+        json_data[
+            "pkl_collection_sha256"
+        ]
+    )
+
+    print(
+        "✅ postICA_final data SHA-256:",
+        json_data[
+            "postICA_final_data_sha256"
+        ]
+    )
+
+    return json_data
 
 
+def saveLoadTestFinal(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+    start_time
+):
+    from pathlib import Path
+    from datetime import datetime
+    import json
+
+    if postICA_final is None:
+        raise ValueError(
+            "saveLoadTestFinal ha ricevuto postICA_final=None."
+        )
+
+    experiment_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
+    json_data.pop(
+        "postICA_final_joint_plot",
+        None
+    )
+
+    json_data.pop(
+        "postICA_final_joint_plot_tmin_s",
+        None
+    )
+
+    json_data.pop(
+        "postICA_final_joint_plot_tmax_s",
+        None
+    )
+
+    json_data.pop(
+        "postICA_final_joint_times_s",
+        None
+    )
+
+    json_data.pop(
+        "postICA_final_joint_times_ms",
+        None
+    )
+
+    json_data.pop(
+        "postICA_final_joint_plot_error",
+        None
+    )
+
+    old_joint_paths=[
+        experiment_dir
+        /f"{sub}_postICA_final_joint_plot.png",
+        experiment_dir
+        /f"{sub}_final_joint_plot.png"
+    ]
+
+    for old_joint_path in old_joint_paths:
+        try:
+            if old_joint_path.exists():
+                old_joint_path.unlink()
+
+                print(
+                    "🗑️ Vecchio joint plot eliminato:",
+                    old_joint_path
+                )
+
+        except Exception as error:
+            print(
+                "⚠️ Impossibile eliminare il vecchio joint plot:",
+                error
+            )
+
+    try:
+        json_data=plot_final_tep_summary(
+            postICA_final=postICA_final,
+            json_data=json_data,
+            experiment_dir=experiment_dir,
+            sub=sub,
+            dpi=300
+        )
+
+        json_data.pop(
+            "TEP_final_summary_error",
+            None
+        )
+
+        print(
+            "✅ Final TEP summary:",
+            json_data.get(
+                "TEP_final_summary_plot"
+            )
+        )
+
+    except Exception as error:
+        json_data[
+            "TEP_final_summary_plot"
+        ]=None
+
+        json_data[
+            "TEP_final_summary_error"
+        ]=str(
+            error
+        )
+
+        print(
+            "⚠️ Impossibile generare il final TEP summary:",
+            error
+        )
+
+    try:
+        json_data=update_pkl_hashes(
+            postICA_final=postICA_final,
+            json_data=json_data,
+            experiment_dir=experiment_dir
+        )
+
+        json_data.pop(
+            "pkl_hashes_error",
+            None
+        )
+
+    except Exception as error:
+        json_data[
+            "pkl_hashes_error"
+        ]=str(
+            error
+        )
+
+        print(
+            "⚠️ Impossibile calcolare gli hash dei PKL:",
+            error
+        )
+
+    try:
+        json_data[
+            "saveLoadTestFinal_runtime_seconds"
+        ]=float(
+            datetime.now().timestamp()
+            -float(start_time)
+        )
+
+    except Exception:
+        json_data[
+            "saveLoadTestFinal_runtime_seconds"
+        ]=None
+
+    json_data[
+        "final_data_object_type"
+    ]=type(
+        postICA_final
+    ).__name__
+
+    json_data[
+        "final_data_sfreq"
+    ]=float(
+        postICA_final.info[
+            "sfreq"
+        ]
+    )
+
+    json_data[
+        "final_data_channels"
+    ]=list(
+        postICA_final.ch_names
+    )
+
+    json_data[
+        "final_data_bads"
+    ]=list(
+        postICA_final.info.get(
+            "bads",
+            []
+        )
+    )
+
+    json_data[
+        "final_data_tmin"
+    ]=float(
+        postICA_final.times[
+            0
+        ]
+    )
+
+    json_data[
+        "final_data_tmax"
+    ]=float(
+        postICA_final.times[
+            -1
+        ]
+    )
+
+    json_data[
+        "final_data_n_epochs"
+    ]=int(
+        len(
+            postICA_final
+        )
+    )
+
+    json_data[
+        "final_data_n_channels"
+    ]=int(
+        len(
+            postICA_final.ch_names
+        )
+    )
+
+    json_data[
+        "final_stimulation_side"
+    ]=str(
+        json_data.get(
+            "emispheric_stimulation",
+            "UNK"
+        )
+    ).upper()
+
+    json_data[
+        "TEP_final_summary_joint_plot_disabled"
+    ]=True
+
+    pars_path=(
+        experiment_dir
+        /f"{sub}_pars.json"
+    )
+
+    try:
+        with open(
+            pars_path,
+            "w",
+            encoding="utf-8"
+        ) as file:
+            json.dump(
+                json_data,
+                file,
+                indent=4,
+                sort_keys=True,
+                default=str
+            )
+
+        print(
+            "✅ JSON globale aggiornato:",
+            pars_path
+        )
+
+    except Exception as error:
+        print(
+            "⚠️ Impossibile aggiornare il JSON globale:",
+            error
+        )
+
+    return json_data
 
 
-    
- 
+def plot_final_tep_summary(
+    postICA_final,
+    json_data,
+    experiment_dir,
+    sub,
+    dpi=300
+):
+    import json
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import mne
+
+    from pathlib import Path
+    from scipy.signal import find_peaks
+    from matplotlib.patches import ConnectionPatch
+
+    if postICA_final is None:
+        raise ValueError(
+            "plot_final_tep_summary ha ricevuto postICA_final=None."
+        )
+
+    experiment_dir=Path(
+        experiment_dir
+    ).expanduser().resolve()
+
+    def resolve_path(value):
+        if value is None:
+            return None
+
+        try:
+            path=Path(
+                str(value)
+            ).expanduser()
+
+            if not path.is_absolute():
+                path=experiment_dir/path
+
+            return path.resolve()
+
+        except Exception:
+            return None
+
+    def optional_float(value):
+        if value is None:
+            return None
+
+        try:
+            value=float(value)
+        except Exception:
+            return None
+
+        if not np.isfinite(value):
+            return None
+
+        return value
+
+    def optional_int(value):
+        if value is None:
+            return None
+
+        try:
+            return int(
+                float(value)
+            )
+        except Exception:
+            return None
+
+    def load_tfr_csv(csv_path):
+        dataframe=pd.read_csv(
+            csv_path,
+            index_col=0
+        )
+
+        frequencies=pd.to_numeric(
+            dataframe.index,
+            errors="coerce"
+        ).to_numpy(
+            dtype=float
+        )
+
+        times_raw=np.asarray(
+            [
+                float(column)
+                for column in dataframe.columns
+            ],
+            dtype=float
+        )
+
+        tfr=dataframe.apply(
+            pd.to_numeric,
+            errors="coerce"
+        ).to_numpy(
+            dtype=float
+        )
+
+        valid_frequencies=np.isfinite(
+            frequencies
+        )
+
+        frequencies=frequencies[
+            valid_frequencies
+        ]
+
+        tfr=tfr[
+            valid_frequencies,
+            :
+        ]
+
+        if (
+            times_raw.size
+            and np.nanmax(
+                np.abs(
+                    times_raw
+                )
+            )<=10
+        ):
+            times_tfr_ms=times_raw*1000.0
+        else:
+            times_tfr_ms=times_raw
+
+        time_order=np.argsort(
+            times_tfr_ms
+        )
+
+        frequency_order=np.argsort(
+            frequencies
+        )
+
+        times_tfr_ms=times_tfr_ms[
+            time_order
+        ]
+
+        frequencies=frequencies[
+            frequency_order
+        ]
+
+        tfr=tfr[
+            frequency_order,
+            :
+        ][
+            :,
+            time_order
+        ]
+
+        return (
+            times_tfr_ms,
+            frequencies,
+            tfr
+        )
+
+    def select_topomap_indices(
+        times_ms,
+        gmfp,
+        sfreq,
+        x_min,
+        x_max,
+        n_maps,
+        tmin_ms,
+        tmax_ms,
+        minimum_distance_ms
+    ):
+        search_mask=(
+            (times_ms>=max(x_min,tmin_ms))
+            &(times_ms<=min(x_max,tmax_ms))
+        )
+
+        if np.sum(search_mask)<3:
+            search_mask=(
+                (times_ms>=x_min)
+                &(times_ms<=x_max)
+            )
+
+        candidate_indices=np.where(
+            search_mask
+        )[0]
+
+        if candidate_indices.size==0:
+            return []
+
+        candidate_gmfp=gmfp[
+            candidate_indices
+        ]
+
+        minimum_distance_samples=max(
+            1,
+            int(
+                round(
+                    minimum_distance_ms
+                    *sfreq
+                    /1000.0
+                )
+            )
+        )
+
+        peaks,_=find_peaks(
+            candidate_gmfp,
+            distance=minimum_distance_samples
+        )
+
+        selected=[]
+
+        if peaks.size:
+            ranked_peaks=peaks[
+                np.argsort(
+                    candidate_gmfp[
+                        peaks
+                    ]
+                )[::-1]
+            ]
+
+            for local_index in ranked_peaks:
+                global_index=int(
+                    candidate_indices[
+                        local_index
+                    ]
+                )
+
+                if all(
+                    abs(
+                        global_index-existing_index
+                    )>=minimum_distance_samples
+                    for existing_index in selected
+                ):
+                    selected.append(
+                        global_index
+                    )
+
+                if len(selected)>=n_maps:
+                    break
+
+        if len(selected)<n_maps:
+            ranked_samples=np.argsort(
+                candidate_gmfp
+            )[::-1]
+
+            for local_index in ranked_samples:
+                global_index=int(
+                    candidate_indices[
+                        local_index
+                    ]
+                )
+
+                if all(
+                    abs(
+                        global_index-existing_index
+                    )>=minimum_distance_samples
+                    for existing_index in selected
+                ):
+                    selected.append(
+                        global_index
+                    )
+
+                if len(selected)>=n_maps:
+                    break
+
+        if len(selected)<n_maps:
+            fallback_positions=np.linspace(
+                0,
+                len(candidate_indices)-1,
+                min(
+                    n_maps,
+                    len(candidate_indices)
+                )
+            ).astype(int)
+
+            for local_index in fallback_positions:
+                global_index=int(
+                    candidate_indices[
+                        local_index
+                    ]
+                )
+
+                if global_index not in selected:
+                    selected.append(
+                        global_index
+                    )
+
+                if len(selected)>=n_maps:
+                    break
+
+        return sorted(
+            selected[:n_maps]
+        )
+
+    side=str(
+        json_data.get(
+            "emispheric_stimulation",
+            json_data.get(
+                "hemispheric_stimulation",
+                "UNK"
+            )
+        )
+    ).strip().upper()
+
+    evoked=postICA_final.average()
+
+    data_uv=np.asarray(
+        evoked.get_data(),
+        dtype=float
+    )*1e6
+
+    times_ms=np.asarray(
+        evoked.times,
+        dtype=float
+    )*1000.0
+
+    sfreq=float(
+        evoked.info["sfreq"]
+    )
+
+    n_epochs=int(
+        len(
+            postICA_final
+        )
+    )
+
+    n_channels=int(
+        len(
+            evoked.ch_names
+        )
+    )
+
+    data_min_ms=float(
+        np.nanmin(
+            times_ms
+        )
+    )
+
+    data_max_ms=float(
+        np.nanmax(
+            times_ms
+        )
+    )
+
+    requested_min_ms=1000.0*float(
+        json_data.get(
+            "epochs_plot_timewindow_min",
+            evoked.times.min()
+        )
+    )
+
+    requested_max_ms=1000.0*float(
+        json_data.get(
+            "epochs_plot_timewindow_max",
+            evoked.times.max()
+        )
+    )
+
+    x_min=max(
+        requested_min_ms,
+        data_min_ms
+    )
+
+    x_max=min(
+        requested_max_ms,
+        data_max_ms
+    )
+
+    if x_min>=x_max:
+        raise ValueError(
+            "Finestra grafica non valida: "
+            f"{x_min:.1f}–{x_max:.1f} ms."
+        )
+
+    plot_mask=(
+        (times_ms>=x_min)
+        &(times_ms<=x_max)
+    )
+
+    if not np.any(plot_mask):
+        raise ValueError(
+            "La finestra grafica non contiene campioni."
+        )
+
+    channel_colors=plt.cm.hsv(
+        np.linspace(
+            0,
+            1,
+            n_channels,
+            endpoint=False
+        )
+    )
+
+    gmfp=np.sqrt(
+        np.nanmean(
+            data_uv**2,
+            axis=0
+        )
+    )
+
+    response_window=json_data.get(
+        "pcist_response_window_ms",
+        (10.0,300.0)
+    )
+
+    if (
+        isinstance(
+            response_window,
+            (list,tuple)
+        )
+        and len(response_window)==2
+    ):
+        response_start_ms=float(
+            response_window[0]
+        )
+
+        response_end_ms=float(
+            response_window[1]
+        )
+    else:
+        response_start_ms=10.0
+        response_end_ms=300.0
+
+    gmfp_peak_mask=(
+        (times_ms>=response_start_ms)
+        &(times_ms<=response_end_ms)
+        &plot_mask
+    )
+
+    if not np.any(gmfp_peak_mask):
+        gmfp_peak_mask=(
+            (times_ms>=0)
+            &plot_mask
+        )
+
+    if not np.any(gmfp_peak_mask):
+        gmfp_peak_mask=plot_mask.copy()
+
+    gmfp_peak_indices=np.where(
+        gmfp_peak_mask
+    )[0]
+
+    gmfp_peak_index=int(
+        gmfp_peak_indices[
+            np.nanargmax(
+                gmfp[
+                    gmfp_peak_mask
+                ]
+            )
+        ]
+    )
+
+    gmfp_peak_uv=float(
+        gmfp[
+            gmfp_peak_index
+        ]
+    )
+
+    gmfp_peak_latency_ms=float(
+        times_ms[
+            gmfp_peak_index
+        ]
+    )
+
+    n_topomaps=int(
+        json_data.get(
+            "TEP_final_summary_n_topomaps",
+            4
+        )
+    )
+
+    n_topomaps=max(
+        1,
+        min(
+            n_topomaps,
+            6
+        )
+    )
+
+    topomap_tmin_ms=float(
+        json_data.get(
+            "TEP_final_summary_topomap_tmin_ms",
+            max(
+                20.0,
+                response_start_ms
+            )
+        )
+    )
+
+    topomap_tmax_ms=float(
+        json_data.get(
+            "TEP_final_summary_topomap_tmax_ms",
+            min(
+                300.0,
+                response_end_ms
+            )
+        )
+    )
+
+    topomap_min_distance_ms=float(
+        json_data.get(
+            "TEP_final_summary_topomap_min_distance_ms",
+            30.0
+        )
+    )
+
+    configured_times=json_data.get(
+        "TEP_final_summary_topomap_times_ms",
+        None
+    )
+
+    if (
+        isinstance(
+            configured_times,
+            (list,tuple)
+        )
+        and len(configured_times)>0
+    ):
+        topomap_indices=[]
+
+        for time_value in configured_times:
+            try:
+                time_value=float(
+                    time_value
+                )
+            except Exception:
+                continue
+
+            if not x_min<=time_value<=x_max:
+                continue
+
+            nearest_index=int(
+                np.argmin(
+                    np.abs(
+                        times_ms-time_value
+                    )
+                )
+            )
+
+            if nearest_index not in topomap_indices:
+                topomap_indices.append(
+                    nearest_index
+                )
+
+        topomap_indices=sorted(
+            topomap_indices
+        )[:n_topomaps]
+
+    else:
+        topomap_indices=select_topomap_indices(
+            times_ms=times_ms,
+            gmfp=gmfp,
+            sfreq=sfreq,
+            x_min=x_min,
+            x_max=x_max,
+            n_maps=n_topomaps,
+            tmin_ms=topomap_tmin_ms,
+            tmax_ms=topomap_tmax_ms,
+            minimum_distance_ms=topomap_min_distance_ms
+        )
+
+    pci_value=optional_float(
+        json_data.get(
+            "PCIst"
+        )
+    )
+
+    pci_n_dims=optional_int(
+        json_data.get(
+            "PCIst_n_dims"
+        )
+    )
+
+    energy_value=optional_float(
+        json_data.get(
+            "feat_step_energy"
+        )
+    )
+
+    integral_value=optional_float(
+        json_data.get(
+            "feat_step_absolute_integral",
+            json_data.get(
+                "feat_step_integral"
+            )
+        )
+    )
+
+    nf_value=optional_float(
+        json_data.get(
+            "TEP_natural_frequency_hz"
+        )
+    )
+
+    nf_score=optional_float(
+        json_data.get(
+            "TEP_natural_frequency_score",
+            json_data.get(
+                "TEP_natural_frequency_power_db"
+            )
+        )
+    )
+
+    nf_boundary=bool(
+        json_data.get(
+            "TEP_natural_frequency_at_boundary",
+            False
+        )
+    )
+
+    nf_seed_channels=json_data.get(
+        "TEP_natural_frequency_seed_channels",
+        json_data.get(
+            "seedChans",
+            []
+        )
+    )
+
+    if isinstance(
+        nf_seed_channels,
+        (list,tuple)
+    ):
+        nf_seed_text=", ".join(
+            str(channel)
+            for channel in nf_seed_channels
+        )
+    else:
+        nf_seed_text=str(
+            nf_seed_channels
+        )
+
+    nf_tfr_csv=resolve_path(
+        json_data.get(
+            "TEP_natural_frequency_tfr_csv"
+        )
+    )
+
+    nf_spectrum_csv=resolve_path(
+        json_data.get(
+            "TEP_natural_frequency_spectrum_csv"
+        )
+    )
+
+    feature_labels=[]
+    feature_values=[]
+    feature_units=[]
+
+    if energy_value is not None:
+        feature_labels.append(
+            "Energy"
+        )
+
+        feature_values.append(
+            energy_value
+        )
+
+        feature_units.append(
+            "µV²"
+        )
+
+    if integral_value is not None:
+        feature_labels.append(
+            "Absolute integral"
+        )
+
+        feature_values.append(
+            integral_value
+        )
+
+        feature_units.append(
+            "µV·ms"
+        )
+
+    if pci_value is not None:
+        feature_labels.append(
+            "PCIst"
+        )
+
+        feature_values.append(
+            pci_value
+        )
+
+        feature_units.append(
+            ""
+        )
+
+    if pci_n_dims is not None:
+        feature_labels.append(
+            "PCIst n_dims"
+        )
+
+        feature_values.append(
+            float(
+                pci_n_dims
+            )
+        )
+
+        feature_units.append(
+            ""
+        )
+
+    figure=plt.figure(
+        figsize=(16,23),
+        constrained_layout=True
+    )
+
+    grid=figure.add_gridspec(
+        nrows=5,
+        ncols=3,
+        width_ratios=[
+            10.0,
+            2.0,
+            0.40
+        ],
+        height_ratios=[
+            2.10,
+            3.10,
+            1.60,
+            3.60,
+            2.50
+        ],
+        hspace=0.16,
+        wspace=0.10
+    )
+
+    topomap_grid=grid[0,:].subgridspec(
+        1,
+        n_topomaps+1,
+        width_ratios=[
+            *([1.0]*n_topomaps),
+            0.10
+        ],
+        wspace=0.08
+    )
+
+    topomap_axes=[
+        figure.add_subplot(
+            topomap_grid[
+                0,
+                index
+            ]
+        )
+        for index in range(
+            n_topomaps
+        )
+    ]
+
+    ax_topomap_colorbar=figure.add_subplot(
+        topomap_grid[
+            0,
+            n_topomaps
+        ]
+    )
+
+    ax_butterfly=figure.add_subplot(
+        grid[1,0]
+    )
+
+    ax_scalp=figure.add_subplot(
+        grid[1,1]
+    )
+
+    ax_butterfly_pad=figure.add_subplot(
+        grid[1,2]
+    )
+
+    ax_gmfp=figure.add_subplot(
+        grid[2,0],
+        sharex=ax_butterfly
+    )
+
+    ax_gmfp_side=figure.add_subplot(
+        grid[2,1:]
+    )
+
+    ax_ersp=figure.add_subplot(
+        grid[3,0],
+        sharex=ax_butterfly
+    )
+
+    ax_ersp_profile=figure.add_subplot(
+        grid[3,1],
+        sharey=ax_ersp
+    )
+
+    ax_ersp_colorbar=figure.add_subplot(
+        grid[3,2]
+    )
+
+    ax_features=figure.add_subplot(
+        grid[4,:]
+    )
+
+    ax_butterfly_pad.axis(
+        "off"
+    )
+
+    ax_gmfp_side.axis(
+        "off"
+    )
+
+    for channel_index in range(
+        n_channels
+    ):
+        ax_butterfly.plot(
+            times_ms[
+                plot_mask
+            ],
+            data_uv[
+                channel_index,
+                plot_mask
+            ],
+            color=channel_colors[
+                channel_index
+            ],
+            linewidth=1.0,
+            alpha=0.75
+        )
+
+    if x_min<=0<=x_max:
+        ax_butterfly.axvline(
+            0,
+            color="black",
+            linestyle="--",
+            linewidth=1
+        )
+
+    ax_butterfly.axhline(
+        0,
+        color="black",
+        linewidth=0.8
+    )
+
+    ax_butterfly.set_xlim(
+        x_min,
+        x_max
+    )
+
+    ax_butterfly.set_ylabel(
+        "Amplitude [µV]"
+    )
+
+    ax_butterfly.set_title(
+        (
+            f"Final TEP butterfly — "
+            f"{side} stimulation\n"
+            f"epochs={n_epochs} | "
+            f"channels={n_channels}"
+        ),
+        pad=8
+    )
+
+    ax_butterfly.tick_params(
+        axis="x",
+        labelbottom=False
+    )
+
+    ax_butterfly.grid(
+        True,
+        alpha=0.18
+    )
+
+    for axis in topomap_axes:
+        axis.axis(
+            "off"
+        )
+
+    topomap_image=None
+
+    if topomap_indices:
+        topomap_vmax=float(
+            np.nanpercentile(
+                np.abs(
+                    data_uv[
+                        :,
+                        topomap_indices
+                    ]
+                ),
+                98
+            )
+        )
+
+        if (
+            not np.isfinite(topomap_vmax)
+            or topomap_vmax<=0
+        ):
+            topomap_vmax=1.0
+
+        for axis,index in zip(
+            topomap_axes,
+            topomap_indices
+        ):
+            try:
+                topomap_image,_=mne.viz.plot_topomap(
+                    data_uv[
+                        :,
+                        index
+                    ],
+                    evoked.info,
+                    axes=axis,
+                    show=False,
+                    cmap="RdBu_r",
+                    vlim=(
+                        -topomap_vmax,
+                        topomap_vmax
+                    ),
+                    contours=6,
+                    sensors=True,
+                    outlines="head",
+                    extrapolate="head",
+                    image_interp="cubic"
+                )
+
+                axis.set_title(
+                    f"{times_ms[index]/1000.0:.3f} s",
+                    fontsize=14,
+                    pad=7
+                )
+
+            except Exception as error:
+                axis.text(
+                    0.5,
+                    0.5,
+                    "Topomap\nnot available",
+                    ha="center",
+                    va="center",
+                    transform=axis.transAxes
+                )
+
+                axis.axis(
+                    "off"
+                )
+
+                print(
+                    "⚠️ Final topomap:",
+                    error
+                )
+
+        if topomap_image is not None:
+            topomap_colorbar=figure.colorbar(
+                topomap_image,
+                cax=ax_topomap_colorbar
+            )
+
+            topomap_colorbar.set_label(
+                "Amplitude [µV]"
+            )
+
+        else:
+            ax_topomap_colorbar.axis(
+                "off"
+            )
+
+        topomap_axes[0].text(
+            -0.10,
+            1.20,
+            (
+                f"TEP scalp maps"
+            ),
+            transform=topomap_axes[0].transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=13,
+            fontweight="bold"
+        )
+
+    else:
+        for axis in topomap_axes:
+            axis.text(
+                0.5,
+                0.5,
+                "Topomap not available",
+                ha="center",
+                va="center",
+                transform=axis.transAxes
+            )
+
+            axis.axis(
+                "off"
+            )
+
+        ax_topomap_colorbar.axis(
+            "off"
+        )
+
+    try:
+        positions=np.asarray(
+            [
+                channel["loc"][:2]
+                for channel in evoked.info["chs"]
+            ],
+            dtype=float
+        )
+
+        valid_positions=(
+            np.all(
+                np.isfinite(
+                    positions
+                ),
+                axis=1
+            )
+            &(
+                np.linalg.norm(
+                    positions,
+                    axis=1
+                )>0
+            )
+        )
+
+        scalp_positions=positions[
+            valid_positions
+        ]
+
+        scalp_names=[
+            channel_name
+            for channel_name,valid
+            in zip(
+                evoked.ch_names,
+                valid_positions
+            )
+            if valid
+        ]
+
+        scalp_colors=channel_colors[
+            valid_positions
+        ]
+
+        if len(scalp_positions)==0:
+            raise ValueError(
+                "Nessuna posizione EEG valida."
+            )
+
+        scalp_x=scalp_positions[:,0]
+        scalp_y=scalp_positions[:,1]
+
+        scalp_x-=np.mean(
+            scalp_x
+        )
+
+        scalp_y-=np.mean(
+            scalp_y
+        )
+
+        scalp_radius=float(
+            np.max(
+                np.sqrt(
+                    scalp_x**2
+                    +scalp_y**2
+                )
+            )
+        )
+
+        if scalp_radius>0:
+            scalp_x/=scalp_radius
+            scalp_y/=scalp_radius
+
+        head=plt.Circle(
+            (0,0),
+            1.0,
+            edgecolor="black",
+            facecolor="none",
+            linewidth=1.2
+        )
+
+        ax_scalp.add_patch(
+            head
+        )
+
+        ax_scalp.plot(
+            [-0.08,0.00,0.08],
+            [1.00,1.12,1.00],
+            color="black",
+            linewidth=1
+        )
+
+        ax_scalp.plot(
+            [-1.02,-1.08,-1.08,-1.02],
+            [0.15,0.10,-0.10,-0.15],
+            color="black",
+            linewidth=1
+        )
+
+        ax_scalp.plot(
+            [1.02,1.08,1.08,1.02],
+            [0.15,0.10,-0.10,-0.15],
+            color="black",
+            linewidth=1
+        )
+
+        for (
+            x_value,
+            y_value,
+            channel_name,
+            channel_color
+        ) in zip(
+            scalp_x,
+            scalp_y,
+            scalp_names,
+            scalp_colors
+        ):
+            ax_scalp.scatter(
+                x_value,
+                y_value,
+                s=45,
+                color=channel_color,
+                edgecolor="black",
+                linewidth=0.3,
+                zorder=3
+            )
+
+            ax_scalp.text(
+                x_value,
+                y_value+0.055,
+                channel_name,
+                ha="center",
+                va="bottom",
+                fontsize=6
+            )
+
+        ax_scalp.set_xlim(
+            -1.25,
+            1.25
+        )
+
+        ax_scalp.set_ylim(
+            -1.20,
+            1.25
+        )
+
+        ax_scalp.set_aspect(
+            "equal"
+        )
+
+        ax_scalp.set_title(
+            "Butterfly channel colors",
+            pad=10
+        )
+
+        ax_scalp.axis(
+            "off"
+        )
+
+    except Exception as error:
+        ax_scalp.text(
+            0.5,
+            0.5,
+            "Scalp channel colors not available",
+            ha="center",
+            va="center",
+            transform=ax_scalp.transAxes
+        )
+
+        ax_scalp.set_title(
+            "Butterfly channel colors"
+        )
+
+        ax_scalp.axis(
+            "off"
+        )
+
+        print(
+            "⚠️ Scalp channel-color plot:",
+            error
+        )
+
+    ax_gmfp.plot(
+        times_ms[
+            plot_mask
+        ],
+        gmfp[
+            plot_mask
+        ],
+        linewidth=2
+    )
+
+    if x_min<=0<=x_max:
+        ax_gmfp.axvline(
+            0,
+            color="black",
+            linestyle="--",
+            linewidth=1
+        )
+
+    ax_gmfp.axvline(
+        gmfp_peak_latency_ms,
+        color="black",
+        linestyle=":",
+        linewidth=1.4
+    )
+
+    ax_gmfp.scatter(
+        gmfp_peak_latency_ms,
+        gmfp_peak_uv,
+        color="black",
+        s=35,
+        zorder=4
+    )
+
+    ax_gmfp.set_xlim(
+        x_min,
+        x_max
+    )
+
+    ax_gmfp.set_ylabel(
+        "GMFP [µV]"
+    )
+
+    ax_gmfp.set_title(
+        (
+            f"GMFP — {side} stimulation\n"
+            f"peak={gmfp_peak_uv:.3f} µV "
+            f"at {gmfp_peak_latency_ms:.1f} ms"
+        ),
+        pad=8
+    )
+
+    ax_gmfp.tick_params(
+        axis="x",
+        labelbottom=False
+    )
+
+    ax_gmfp.grid(
+        True,
+        alpha=0.18
+    )
+
+    if topomap_indices:
+        figure.canvas.draw()
+
+        butterfly_ymin,butterfly_ymax=(
+            ax_butterfly.get_ylim()
+        )
+
+        connection_y=butterfly_ymax
+
+        for axis,index in zip(
+            topomap_axes,
+            topomap_indices
+        ):
+            selected_time=float(
+                times_ms[
+                    index
+                ]
+            )
+
+            connector=ConnectionPatch(
+                xyA=(
+                    0.5,
+                    0.02
+                ),
+                coordsA=axis.transAxes,
+                xyB=(
+                    selected_time,
+                    connection_y
+                ),
+                coordsB=ax_butterfly.transData,
+                color="0.65",
+                linewidth=1.0,
+                clip_on=False,
+                zorder=1
+            )
+
+            figure.add_artist(
+                connector
+            )
+
+            ax_butterfly.axvline(
+                selected_time,
+                color="0.70",
+                linewidth=0.8,
+                alpha=0.75
+            )
+
+    ersp_available=False
+
+    if (
+        nf_tfr_csv is not None
+        and nf_tfr_csv.exists()
+    ):
+        try:
+            (
+                ersp_times_ms,
+                ersp_frequencies,
+                ersp_db
+            )=load_tfr_csv(
+                nf_tfr_csv
+            )
+
+            valid_time_mask=(
+                (ersp_times_ms>=x_min)
+                &(ersp_times_ms<=x_max)
+            )
+
+            if not np.any(
+                valid_time_mask
+            ):
+                raise ValueError(
+                    "Il TFR non contiene campioni "
+                    "nella finestra richiesta."
+                )
+
+            ersp_times_plot=ersp_times_ms[
+                valid_time_mask
+            ]
+
+            ersp_db_plot=ersp_db[
+                :,
+                valid_time_mask
+            ]
+
+            ersp_vmax=float(
+                np.nanpercentile(
+                    np.abs(
+                        ersp_db_plot
+                    ),
+                    98
+                )
+            )
+
+            if (
+                not np.isfinite(ersp_vmax)
+                or ersp_vmax<=0
+            ):
+                ersp_vmax=1.0
+
+            ersp_image=ax_ersp.pcolormesh(
+                ersp_times_plot,
+                ersp_frequencies,
+                ersp_db_plot,
+                shading="auto",
+                cmap="jet",
+                vmin=-ersp_vmax,
+                vmax=ersp_vmax
+            )
+
+            if x_min<=0<=x_max:
+                ax_ersp.axvline(
+                    0,
+                    color="black",
+                    linestyle=":",
+                    linewidth=1.5
+                )
+
+            if nf_value is not None:
+                ax_ersp.axhline(
+                    nf_value,
+                    color="black",
+                    linestyle=":",
+                    linewidth=1.2
+                )
+
+                ax_ersp.text(
+                    x_max
+                    -0.01*(
+                        x_max-x_min
+                    ),
+                    nf_value+0.4,
+                    f"{nf_value:.1f} Hz",
+                    ha="right",
+                    va="bottom",
+                    fontsize=9
+                )
+
+            ax_ersp.set_xlim(
+                x_min,
+                x_max
+            )
+
+            ax_ersp.set_xlabel(
+                "Time [ms]"
+            )
+
+            ax_ersp.set_ylabel(
+                "Frequency [Hz]"
+            )
+
+            title=(
+                f"Morlet ERSP — "
+                f"{side} stimulation"
+            )
+
+            title_details=[]
+
+            if nf_value is not None:
+                title_details.append(
+                    f"NF={nf_value:.1f} Hz"
+                )
+
+            if nf_score is not None:
+                title_details.append(
+                    f"score={nf_score:.3f}"
+                )
+
+            if nf_seed_text:
+                title_details.append(
+                    f"seed={nf_seed_text}"
+                )
+
+            if nf_boundary:
+                title_details.append(
+                    "boundary estimate"
+                )
+
+            if title_details:
+                title+=(
+                    "\n"
+                    +" | ".join(
+                        title_details
+                    )
+                )
+
+            ax_ersp.set_title(
+                title,
+                pad=8
+            )
+
+            colorbar=figure.colorbar(
+                ersp_image,
+                cax=ax_ersp_colorbar
+            )
+
+            colorbar.set_label(
+                "ERSP [dB]"
+            )
+
+            profile_loaded=False
+
+            if (
+                nf_spectrum_csv is not None
+                and nf_spectrum_csv.exists()
+            ):
+                spectrum_dataframe=pd.read_csv(
+                    nf_spectrum_csv
+                )
+
+                required_columns={
+                    "frequency_hz",
+                    "cumulative_positive_ersp"
+                }
+
+                if required_columns.issubset(
+                    spectrum_dataframe.columns
+                ):
+                    profile_frequencies=pd.to_numeric(
+                        spectrum_dataframe[
+                            "frequency_hz"
+                        ],
+                        errors="coerce"
+                    ).to_numpy(
+                        dtype=float
+                    )
+
+                    profile_values=pd.to_numeric(
+                        spectrum_dataframe[
+                            "cumulative_positive_ersp"
+                        ],
+                        errors="coerce"
+                    ).to_numpy(
+                        dtype=float
+                    )
+
+                    valid_profile=(
+                        np.isfinite(
+                            profile_frequencies
+                        )
+                        &np.isfinite(
+                            profile_values
+                        )
+                    )
+
+                    profile_frequencies=profile_frequencies[
+                        valid_profile
+                    ]
+
+                    profile_values=profile_values[
+                        valid_profile
+                    ]
+
+                    if profile_values.size:
+                        ax_ersp_profile.plot(
+                            profile_values,
+                            profile_frequencies,
+                            color="black",
+                            linewidth=2
+                        )
+
+                        profile_loaded=True
+
+            if not profile_loaded:
+                positive_ersp=np.maximum(
+                    ersp_db_plot,
+                    0
+                )
+
+                if hasattr(
+                    np,
+                    "trapezoid"
+                ):
+                    profile_values=np.trapezoid(
+                        positive_ersp,
+                        x=ersp_times_plot,
+                        axis=1
+                    )
+                else:
+                    profile_values=np.trapz(
+                        positive_ersp,
+                        x=ersp_times_plot,
+                        axis=1
+                    )
+
+                ax_ersp_profile.plot(
+                    profile_values,
+                    ersp_frequencies,
+                    color="black",
+                    linewidth=2
+                )
+
+            ax_ersp_profile.set_xlabel(
+                "Cumulative\npositive ERSP"
+            )
+
+            ax_ersp_profile.tick_params(
+                axis="y",
+                labelleft=False
+            )
+
+            ax_ersp_profile.grid(
+                True,
+                alpha=0.15
+            )
+
+            visible_fmin=float(
+                np.nanmin(
+                    ersp_frequencies
+                )
+            )
+
+            visible_fmax=float(
+                np.nanmax(
+                    ersp_frequencies
+                )
+            )
+
+            frequency_bands=[
+                ("α",8.0,12.0),
+                ("β1",13.0,20.0),
+                ("β2",21.0,29.0),
+                ("γ",30.0,visible_fmax)
+            ]
+
+            for (
+                band_label,
+                band_min,
+                band_max
+            ) in frequency_bands:
+                visible_start=max(
+                    band_min,
+                    visible_fmin
+                )
+
+                visible_stop=min(
+                    band_max,
+                    visible_fmax
+                )
+
+                if visible_start>visible_stop:
+                    continue
+
+                band_center=(
+                    visible_start
+                    +visible_stop
+                )/2.0
+
+                if visible_fmin<=band_min<=visible_fmax:
+                    ax_ersp_profile.axhline(
+                        band_min,
+                        color="0.7",
+                        linewidth=0.7
+                    )
+
+                ax_ersp_profile.text(
+                    0.96,
+                    band_center,
+                    band_label,
+                    transform=(
+                        ax_ersp_profile
+                        .get_yaxis_transform()
+                    ),
+                    ha="right",
+                    va="center",
+                    fontsize=9
+                )
+
+            ersp_available=True
+
+        except Exception as error:
+            print(
+                "⚠️ Morlet ERSP summary:",
+                error
+            )
+
+    if not ersp_available:
+        ax_ersp.text(
+            0.5,
+            0.5,
+            "Morlet ERSP not available",
+            ha="center",
+            va="center",
+            transform=ax_ersp.transAxes
+        )
+
+        ax_ersp.set_xlim(
+            x_min,
+            x_max
+        )
+
+        ax_ersp.set_xlabel(
+            "Time [ms]"
+        )
+
+        ax_ersp.set_ylabel(
+            "Frequency [Hz]"
+        )
+
+        ax_ersp_profile.axis(
+            "off"
+        )
+
+        ax_ersp_colorbar.axis(
+            "off"
+        )
+
+    if feature_values:
+        values=np.asarray(
+            feature_values,
+            dtype=float
+        )
+
+        positions=np.arange(
+            len(values)
+        )
+
+        bars=ax_features.barh(
+            positions,
+            values
+        )
+
+        ax_features.set_yticks(
+            positions
+        )
+
+        ax_features.set_yticklabels(
+            feature_labels
+        )
+
+        ax_features.invert_yaxis()
+
+        finite_nonzero=np.abs(
+            values[
+                np.isfinite(values)
+                &(values!=0)
+            ]
+        )
+
+        use_symlog=False
+
+        if finite_nonzero.size>=2:
+            minimum_value=max(
+                float(
+                    np.nanmin(
+                        finite_nonzero
+                    )
+                ),
+                np.finfo(float).tiny
+            )
+
+            maximum_value=float(
+                np.nanmax(
+                    finite_nonzero
+                )
+            )
+
+            use_symlog=bool(
+                maximum_value/minimum_value>1e4
+            )
+
+        if use_symlog:
+            linear_threshold=max(
+                float(
+                    np.nanmin(
+                        finite_nonzero
+                    )
+                )*10.0,
+                1e-15
+            )
+
+            ax_features.set_xscale(
+                "symlog",
+                linthresh=linear_threshold
+            )
+
+            scale_label="symlog scale"
+        else:
+            scale_label="linear scale"
+
+        for (
+            bar,
+            value,
+            unit
+        ) in zip(
+            bars,
+            values,
+            feature_units
+        ):
+            text=(
+                f"{value:.4g} {unit}"
+                if unit
+                else f"{value:.4g}"
+            )
+
+            ax_features.annotate(
+                text,
+                xy=(
+                    bar.get_width(),
+                    bar.get_y()
+                    +bar.get_height()/2
+                ),
+                xytext=(
+                    5 if value>=0 else -5,
+                    0
+                ),
+                textcoords="offset points",
+                ha=(
+                    "left"
+                    if value>=0
+                    else "right"
+                ),
+                va="center",
+                fontsize=9
+            )
+
+        ax_features.set_xlabel(
+            f"Feature value ({scale_label})"
+        )
+
+        ax_features.set_title(
+            (
+                f"Scalar TEP features — "
+                f"{side} stimulation\n"
+                "Energy, absolute integral and PCIst summary"
+            ),
+            pad=8
+        )
+
+        ax_features.grid(
+            True,
+            axis="x",
+            alpha=0.18
+        )
+
+    else:
+        ax_features.text(
+            0.5,
+            0.5,
+            "Scalar TEP features not available",
+            ha="center",
+            va="center",
+            transform=ax_features.transAxes
+        )
+
+        ax_features.axis(
+            "off"
+        )
+
+    ax_butterfly.set_xlim(
+        x_min,
+        x_max
+    )
+
+    ax_gmfp.set_xlim(
+        x_min,
+        x_max
+    )
+
+    ax_ersp.set_xlim(
+        x_min,
+        x_max
+    )
+
+    figure.suptitle(
+        (
+            f"{sub} — Final TEP summary — "
+            f"STIMULATION SIDE: {side}"
+        ),
+        fontsize=21
+    )
+
+    output_path=(
+        experiment_dir
+        /f"{sub}_{side}_TEP_final_summary.png"
+    )
+
+    figure.savefig(
+        output_path,
+        dpi=dpi,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    plt.close(
+        figure
+    )
+
+    selected_topomap_times_ms=[
+        float(
+            times_ms[
+                index
+            ]
+        )
+        for index in topomap_indices
+    ]
+
+    json_data[
+        "TEP_final_summary_plot"
+    ]=str(
+        output_path
+    )
+
+    json_data[
+        "TEP_final_summary_side"
+    ]=side
+
+    json_data[
+        "TEP_final_summary_requested_time_axis_ms"
+    ]=[
+        float(requested_min_ms),
+        float(requested_max_ms)
+    ]
+
+    json_data[
+        "TEP_final_summary_effective_time_axis_ms"
+    ]=[
+        float(x_min),
+        float(x_max)
+    ]
+
+    json_data[
+        "TEP_final_summary_topomap_times_ms"
+    ]=selected_topomap_times_ms
+
+    json_data[
+        "TEP_final_summary_topomap_times_s"
+    ]=[
+        float(
+            time_ms/1000.0
+        )
+        for time_ms in selected_topomap_times_ms
+    ]
+
+    json_data[
+        "TEP_final_summary_topomap_selection"
+    ]=(
+        "Local GMFP maxima ranked by amplitude "
+        "with minimum temporal separation"
+    )
+
+    json_data[
+        "TEP_final_summary_topomap_min_distance_ms"
+    ]=float(
+        topomap_min_distance_ms
+    )
+
+    json_data[
+        "TEP_final_GMFP_peak_uV"
+    ]=gmfp_peak_uv
+
+    json_data[
+        "TEP_final_GMFP_peak_latency_ms"
+    ]=gmfp_peak_latency_ms
+
+    json_data[
+        "TEP_final_summary_PCIst"
+    ]=pci_value
+
+    json_data[
+        "TEP_final_summary_PCIst_n_dims"
+    ]=pci_n_dims
+
+    json_data[
+        "TEP_final_summary_natural_frequency_hz"
+    ]=nf_value
+
+    json_data[
+        "TEP_final_summary_natural_frequency_at_boundary"
+    ]=nf_boundary
+
+    json_data[
+        "TEP_final_summary_scalar_feature_labels"
+    ]=list(
+        feature_labels
+    )
+
+    json_data[
+        "TEP_final_summary_scalar_feature_values"
+    ]=[
+        float(value)
+        for value in feature_values
+    ]
+
+    json_data[
+        "TEP_final_summary_scalar_feature_units"
+    ]=list(
+        feature_units
+    )
+
+    json_data[
+        "TEP_final_summary_temporal_panels_aligned"
+    ]=True
+
+    json_data[
+        "TEP_final_summary_topomap_connectors"
+    ]=True
+
+    json_data[
+        "TEP_final_summary_channel_color_scalp"
+    ]=True
+
+    pars_path=(
+        experiment_dir
+        /f"{sub}_pars.json"
+    )
+
+    with open(
+        pars_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            json_data,
+            file,
+            indent=4,
+            sort_keys=True,
+            default=str
+        )
+
+    print(
+        "✅ Final TEP summary:",
+        output_path
+    )
+
+    print(
+        "   Plot window:",
+        f"{x_min:.1f}–{x_max:.1f} ms"
+    )
+
+    print(
+        "   Topomap times:",
+        selected_topomap_times_ms
+    )
+
+    return json_data
+
+def select_topomap_times_from_gmfp(
+    times_ms,
+    gmfp,
+    sfreq,
+    x_min,
+    x_max,
+    n_maps=4,
+    peak_tmin_ms=20.0,
+    peak_tmax_ms=300.0,
+    min_distance_ms=30.0
+):
+    search_start=max(
+        x_min,
+        peak_tmin_ms
+    )
+
+    search_end=min(
+        x_max,
+        peak_tmax_ms
+    )
+
+    mask=(
+        (times_ms>=search_start)
+        &(times_ms<=search_end)
+    )
+
+    if np.sum(mask)<5:
+        valid_times=times_ms[
+            (times_ms>=x_min)
+            &(times_ms<=x_max)
+        ]
+
+        if len(valid_times)==0:
+            return []
+
+        if len(valid_times)<=n_maps:
+            return list(valid_times)
+
+        idx=np.linspace(
+            0,
+            len(valid_times)-1,
+            n_maps
+        ).astype(int)
+
+        return list(valid_times[idx])
+
+    gmfp_window=gmfp[mask]
+    times_window=times_ms[mask]
+
+    min_distance_samples=max(
+        1,
+        int(
+            round(
+                min_distance_ms
+                *sfreq
+                /1000.0
+            )
+        )
+    )
+
+    peaks,properties=find_peaks(
+        gmfp_window,
+        distance=min_distance_samples
+    )
+
+    if len(peaks)==0:
+        idx=np.linspace(
+            0,
+            len(times_window)-1,
+            min(
+                n_maps,
+                len(times_window)
+            )
+        ).astype(int)
+
+        return list(times_window[idx])
+
+    peak_heights=gmfp_window[peaks]
+
+    order=np.argsort(
+        peak_heights
+    )[::-1]
+
+    selected_peaks=peaks[
+        order[:n_maps]
+    ]
+
+    selected_times=np.sort(
+        times_window[
+            selected_peaks
+        ]
+    )
+
+    if len(selected_times)<n_maps:
+        fallback_idx=np.linspace(
+            0,
+            len(times_window)-1,
+            n_maps
+        ).astype(int)
+
+        fallback_times=list(
+            times_window[
+                fallback_idx
+            ]
+        )
+
+        combined=list(
+            selected_times
+        )
+
+        for time in fallback_times:
+            if len(combined)>=n_maps:
+                break
+
+            if not np.any(
+                np.isclose(
+                    combined,
+                    time,
+                    atol=min_distance_ms/2
+                )
+            ):
+                combined.append(time)
+
+        selected_times=np.sort(
+            np.asarray(combined)
+        )
+
+    return list(
+        selected_times[:n_maps]
+    )
