@@ -210,6 +210,15 @@ https://iopscience.iop.org/article/10.1088/1741-2552/ae668e/meta
 > Sponsor: Meyer Children’s Hospital IRCCS  
 > Principal Investigator: Prof. Simona Balestrini
 
+### TAP-GRIN interventional study
+
+> **A Phase 2 interventional study of L-serine in GRIN-related neurodevelopmental disorders.**  
+> ClinicalTrials.gov identifier: `NCT07377032`
+
+ClinicalTrials.gov record:
+
+https://clinicaltrials.gov/study/NCT07377032?cond=GRIN%20Related%20Disorders&viewType=Card&rank=4
+
 ## BibTeX
 
 ```bibtex
@@ -242,6 +251,13 @@ https://iopscience.iop.org/article/10.1088/1741-2552/ae668e/meta
   note = {ClinicalTrials.gov Identifier: NCT06284291; Project ID: TMSpath; Funding ID: RF-2021-12372804},
   year = {2024}
 }
+
+@misc{TAPGRINClinicalTrial,
+  title = {A Phase 2 interventional study of L-serine in GRIN-related neurodevelopmental disorders},
+  howpublished = {ClinicalTrials.gov},
+  note = {ClinicalTrials.gov Identifier: NCT07377032},
+  year = {2026}
+}
 ```
 
 ## Citation
@@ -259,6 +275,10 @@ When discussing cortical excitability in SCN1A-related epilepsies, please cite:
 When using methods or data associated with the clinical project, please cite the TMSpath clinical study registration:
 
 > **Use of Transcranial Magnetic Stimulation as a Surrogate of Pathophysiology in Genetic Epilepsies.** ClinicalTrials.gov identifier: `NCT06284291`.
+
+For context on interventional studies in GRIN-related neurodevelopmental disorders, please also refer to:
+
+> **A Phase 2 interventional study of L-serine in GRIN-related neurodevelopmental disorders.** ClinicalTrials.gov identifier: `NCT07377032`.
 
 ## Acknowledgement
 
