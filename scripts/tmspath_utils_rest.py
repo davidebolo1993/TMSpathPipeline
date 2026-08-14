@@ -2802,8 +2802,8 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         basic_dir=Path(experiment_dir).expanduser().resolve()/"1.basic"
         basic_dir.mkdir(parents=True,exist_ok=True)
     
-        safe_note=str(note).replace("\\","_").replace("/","_").replace(":","_")
-        safe_sub=str(sub).replace("\\","_").replace("/","_").replace(":","_")
+        safe_note=str(note).replace("/","_").replace("/","_").replace(":","_")
+        safe_sub=str(sub).replace("/","_").replace("/","_").replace(":","_")
     
         layout_path=basic_dir/f"{safe_sub}_{safe_note}_scalplayout.png"
     
@@ -2824,7 +2824,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         json_data['pulse_artifact_rej_timewindow_max'] = 0.008  # not used in sims
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max'] # not used in sims
 
-        # fileName = f"{json_data['mainDir']}\\{json_data['subject']}.fif"
+        # fileName = f"{json_data['mainDir']}/{json_data['subject']}.fif"
         epochs = mne.read_epochs(fileName, preload=True)
         basicPlots(epochs, json_data, experiment_dir, sub, key='epochsOK', subPath='1.basic')
         with open(Path(experiment_dir) / '7.pkls' / f"{sub}_epochsOK.pkl", 'wb') as f:
@@ -3340,8 +3340,8 @@ def load_and_prepare_raw_data_20072026(fileName, json_data, experiment_dir, sub)
         basic_dir=Path(experiment_dir).expanduser().resolve()/"1.basic"
         basic_dir.mkdir(parents=True,exist_ok=True)
     
-        safe_note=str(note).replace("\\","_").replace("/","_").replace(":","_")
-        safe_sub=str(sub).replace("\\","_").replace("/","_").replace(":","_")
+        safe_note=str(note).replace("/","_").replace("/","_").replace(":","_")
+        safe_sub=str(sub).replace("/","_").replace("/","_").replace(":","_")
     
         layout_path=basic_dir/f"{safe_sub}_{safe_note}_scalplayout.png"
     
@@ -3362,7 +3362,7 @@ def load_and_prepare_raw_data_20072026(fileName, json_data, experiment_dir, sub)
         json_data['pulse_artifact_rej_timewindow_max'] = 0.008  # not used in sims
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max'] # not used in sims
 
-        # fileName = f"{json_data['mainDir']}\\{json_data['subject']}.fif"
+        # fileName = f"{json_data['mainDir']}/{json_data['subject']}.fif"
         epochs = mne.read_epochs(fileName, preload=True)
         basicPlots(epochs, json_data, experiment_dir, sub, key='epochsOK', subPath='1.basic')
         with open(Path(experiment_dir) / '7.pkls' / f"{sub}_epochsOK.pkl", 'wb') as f:
@@ -3742,7 +3742,7 @@ def save_rest_ica_detailed_reports(
             return (
                 str(label)
                 .replace("/","_")
-                .replace("\\","_")
+                .replace("/","_")
                 .replace(" ","_")
             )
 
@@ -8756,7 +8756,7 @@ def compute_rest_psd_bands(
                 "/",
                 "_"
             ).replace(
-                "\\",
+                "/",
                 "_"
             )
 
@@ -10145,7 +10145,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1, 
                 linewidths=0.5, cbar=True)
     plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix.png")
+    plt.savefig(f"{experiment_dir}/5.final/FE/{sub}_FE_corrMatrix.png")
     plt.close()
     
     # 3    
@@ -10160,7 +10160,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1, 
                 linewidths=0.5, cbar=True)
     plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix_seed.png")
+    plt.savefig(f"{experiment_dir}/5.final/FE/{sub}_FE_corrMatrix_seed.png")
     plt.close()
 
     # 4
@@ -10173,7 +10173,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
     plt.grid(False)
     plt.title('Average Seed TEP')
     plt.tight_layout()
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_STEP.png")
+    plt.savefig(f"{experiment_dir}/5.final/FE/{sub}_FE_STEP.png")
     plt.close()
 
     seed_indices = [postICA_final.ch_names.index(chan) for chan in json_data["seedChans"] if chan in postICA_final.ch_names]
@@ -12331,7 +12331,7 @@ def plot_ersp(postICA_final, channel=['Cz', 'Fx'], subDir='4.postICA', saveNote=
         for i, FEAT in enumerate(raw.ch_names):
             print(FEAT)
             ersp, freqs = tmspath_utils_adj.plot_ersp(postICA_final, FEAT, n_cycle=2, show=False, ax=ax[i])
-        fig.savefig(f"{experiment_dir}\\{subDir}\\{sub}_ERSP_{saveNote}.png")
+        fig.savefig(f"{experiment_dir}/{subDir}/{sub}_ERSP_{saveNote}.png")
 
 def plot_topomap(postICA_final, 
                  json_data, experiment_dir, sub,
@@ -12507,10 +12507,10 @@ def run_ica_filtering(EPOCHS, n_components=None, manualCheck=True, threshold_per
     all_components = set(np.arange(ica.get_components().shape[1]))
     remaining_components = list(all_components - set(excluded_components))
     fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-    fig1.savefig(f"{experiment_dir}\\{subPath}\\{sub}_excluded_ICAs_{saveNote}.png")
+    fig1.savefig(f"{experiment_dir}/{subPath}/{sub}_excluded_ICAs_{saveNote}.png")
     plt.close()
     fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-    fig2.savefig(f"{experiment_dir}\\{subPath}\\{sub}_included_ICAs_{saveNote}.png")
+    fig2.savefig(f"{experiment_dir}/{subPath}/{sub}_included_ICAs_{saveNote}.png")
     plt.close()
     fig, ax = plt.subplots(figsize=(10, 5))
     above_threshold = np.where(eigenvalues >= threshold)[0]  # Indici sopra soglia
@@ -12522,7 +12522,7 @@ def run_ica_filtering(EPOCHS, n_components=None, manualCheck=True, threshold_per
     ax.set_ylabel("Eigenvalue")
     ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
     ax.legend()
-    fig.savefig(f"{experiment_dir}\\{subPath}\\{sub}_eigenvalueDist_{saveNote}.png")
+    fig.savefig(f"{experiment_dir}/{subPath}/{sub}_eigenvalueDist_{saveNote}.png")
     plt.close()
     if manualCheck: 
         ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
@@ -12618,7 +12618,7 @@ def run_ica_filtering_v2(EPOCHS, n_components=None, manualCheck=True, threshold_
 
 def run_ica_artist_ext_only(EPOCHS, n_components=None, ext_threshold_uv=30, manualCheck=True, subPath='4.postICA', saveNote='postICA'):
     import os
-    os.makedirs(f"{experiment_dir}\\{subPath}", exist_ok=True)
+    os.makedirs(f"{experiment_dir}/{subPath}", exist_ok=True)
 
     # ICA
     ica = mne.preprocessing.ICA(n_components=n_components,
@@ -12674,7 +12674,7 @@ def run_ica_artist_tms_events(raw, events, n_components=None,
     import numpy as np
     import mne
 
-    os.makedirs(f"{experiment_dir}\\{subPath}", exist_ok=True)
+    os.makedirs(f"{experiment_dir}/{subPath}", exist_ok=True)
 
     sfreq = raw.info['sfreq']
     n_samples_window = int(window_ms / 1000 * sfreq)
@@ -12824,7 +12824,7 @@ def plot_customTEP(EPOCHS, subDir, key, FIGSIZE):
     ax.set_title(f"{sub} - {key}")
     ax.legend(loc='upper right', frameon=True, shadow=True)
     #fig.tight_layout()
-    fig.savefig(f"{experiment_dir}\\{subPath}\\butterflyPaper_{key}.png")
+    fig.savefig(f"{experiment_dir}/{subPath}/butterflyPaper_{key}.png")
     plt.close(fig)
 
     """
@@ -13766,7 +13766,7 @@ def computeSlopesPlot(df_slopes,
 
 
     # Salvataggio del primo plot
-    fig.savefig(f"{experiment_dir}\\{subPath}\\{VAR}_{saveNote}.png")
+    fig.savefig(f"{experiment_dir}/{subPath}/{VAR}_{saveNote}.png")
     plt.close(fig)
 
     # Seleziona la variabile di interesse
@@ -13783,7 +13783,7 @@ def computeSlopesPlot(df_slopes,
     #plt.title(f"ANOVA: F={anova_stat:.3f}, p={p_value:.3e} \n {json_data['seedChans']}") #\n {multimodal_text}")
     p_text = "p<0.05" if p_value < 0.05 else "p=ns"
     plt.title(f"{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={json_data['seedChans']}")
-    plt.savefig(f"{experiment_dir}\\{subPath}\\histo_{VAR}_{saveNote}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/histo_{VAR}_{saveNote}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     print('p_value', p_value, 'F', anova_stat)
@@ -14968,7 +14968,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     sns.pointplot(data=df_neural_params, x='pol_degree', y='slope', ax=ax1, color='b')
     ax1.set_ylabel('exp of 1/f^exp', color='b')
     ax1.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_slope.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/{saveNote}_slope.png", dpi=300, bbox_inches='tight')
     plt.close(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(13, 6))
@@ -14977,7 +14977,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Number of Resonances', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_resonances.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/{saveNote}_resonances.png", dpi=300, bbox_inches='tight')
     plt.close(fig2)
 
     # F and p da PSTATS2
@@ -14999,7 +14999,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_yscale('log')
     ax1.set_xlabel('Polynomial Degree')
     ax1.set_title(f"Estimated Pol Degree (min F)={pol_degree_min_F}")
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_fp.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/{saveNote}_fp.png", dpi=300, bbox_inches='tight')
     plt.close(fig3)
 
     fig4, ax4 = plt.subplots(figsize=(13, 6))
@@ -15008,7 +15008,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Fit Error', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_fitError.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/{saveNote}_fitError.png", dpi=300, bbox_inches='tight')
     plt.close(fig4)
 
     fig5, ax5 = plt.subplots(figsize=(13, 6))
@@ -15017,7 +15017,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Fit Error', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_r2.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{experiment_dir}/{subPath}/{saveNote}_r2.png", dpi=300, bbox_inches='tight')
     plt.close(fig4)
 
     return df_neural_params, pol_degree_min_resonances, pol_degree_min_F
@@ -15867,7 +15867,7 @@ def save_rest_ica_reports(
         return (
             str(label)
             .replace("/","_")
-            .replace("\\","_")
+            .replace("/","_")
             .replace(" ","_")
         )
 
