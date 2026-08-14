@@ -9554,7 +9554,7 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
         print('###')
         
         with warnings.catch_warnings():
-            warnings.simplefilter('ignore', np.RankWarning)
+            warnings.simplefilter('ignore', np.exceptions.RankWarning)
 
             epochs_detrended, mse_detrend, max_order_pre_list = computeDetrend_v6(
                 epochs_to_process,
@@ -11719,7 +11719,7 @@ def selectTEPfeat(EPOCH,  json_data, experiment_dir, sub, seed=['Cz', 'Fz']):
     
     ch_names = EPOCH.ch_names
     selected_peaks = []
-    colors = itertools.cycle(plt.cm.get_cmap("tab10").colors)
+    colors = itertools.cycle(plt.get_cmap("tab10").colors)
     
     def find_nearest_channel(y_value):
         distances = [np.abs(y_value - np.mean(signals[i] * 1e6)) for i in range(len(ch_names))]
