@@ -556,7 +556,7 @@ def loadASCII(json_data, fileName):
 
     lenChannel = len(df[df.columns[0]].values)
     time = float(Finish_seconds[11:14])
-    print(f"Esperimento ha durata time={time} con sr={lenChannel/time} e samples={lenChannel}")
+    print(f'Esperimento ha durata time={time} con sr={lenChannel/time} e samples={lenChannel}')
 
     
 
@@ -2827,7 +2827,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         # fileName = f"{json_data['mainDir']}\\{json_data['subject']}.fif"
         epochs = mne.read_epochs(fileName, preload=True)
         basicPlots(epochs, json_data, experiment_dir, sub, key='epochsOK', subPath='1.basic')
-        with open(Path(experiment_dir) / '7.pkls' / f"{sub}_epochsOK.pkl", 'wb') as f:
+        with open(Path(experiment_dir) / '7.pkls' / f'{sub}_epochsOK.pkl', 'wb') as f:
             pickle.dump(epochs, f)
         json_data['sfreq'] = epochs.info['sfreq']
         json_data['r_sfreq'] = 512
@@ -3247,7 +3247,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         json_data['pulse_artifact_rej_timewindow_max'] = 0.008 * 1.5
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max']
         if dataType == 'VHDR':
-            raw = mne.io.read_raw_brainvision(f"{fileName}.vhdr", eog=['VEOG', 'HEOG'], preload=True)
+            raw = mne.io.read_raw_brainvision(f'{fileName}.vhdr', eog=['VEOG', 'HEOG'], preload=True)
             try:
                 raw.set_montage('easycap-M1', verbose=True)
             except ValueError as e:
@@ -3271,7 +3271,7 @@ def load_and_prepare_raw_data(fileName, json_data, experiment_dir, sub):
         #json_data['pulse_artifact_rej_timewindow_max'] = 0.008
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max']
         if dataType == 'VHDR':
-            raw = mne.io.read_raw_brainvision(f"{fileName}.vhdr", eog=['VEOG', 'HEOG'], preload=True)
+            raw = mne.io.read_raw_brainvision(f'{fileName}.vhdr', eog=['VEOG', 'HEOG'], preload=True)
             raw.set_montage('easycap-M1', verbose=True)
             events, event_id = mne.events_from_annotations(raw, verbose=False)
             TMScode = 1128
@@ -3365,7 +3365,7 @@ def load_and_prepare_raw_data_20072026(fileName, json_data, experiment_dir, sub)
         # fileName = f"{json_data['mainDir']}\\{json_data['subject']}.fif"
         epochs = mne.read_epochs(fileName, preload=True)
         basicPlots(epochs, json_data, experiment_dir, sub, key='epochsOK', subPath='1.basic')
-        with open(Path(experiment_dir) / '7.pkls' / f"{sub}_epochsOK.pkl", 'wb') as f:
+        with open(Path(experiment_dir) / '7.pkls' / f'{sub}_epochsOK.pkl', 'wb') as f:
             pickle.dump(epochs, f)
         json_data['sfreq'] = epochs.info['sfreq']
         json_data['r_sfreq'] = 512
@@ -3530,7 +3530,7 @@ def load_and_prepare_raw_data_20072026(fileName, json_data, experiment_dir, sub)
         json_data['pulse_artifact_rej_timewindow_max'] = 0.008 * 1.5
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max']
         if dataType == 'VHDR':
-            raw = mne.io.read_raw_brainvision(f"{fileName}.vhdr", eog=['VEOG', 'HEOG'], preload=True)
+            raw = mne.io.read_raw_brainvision(f'{fileName}.vhdr', eog=['VEOG', 'HEOG'], preload=True)
             try:
                 raw.set_montage('easycap-M1', verbose=True)
             except ValueError as e:
@@ -3554,7 +3554,7 @@ def load_and_prepare_raw_data_20072026(fileName, json_data, experiment_dir, sub)
         #json_data['pulse_artifact_rej_timewindow_max'] = 0.008
         #json_data['detrend_minTimeWindowOffset'] = json_data['pulse_artifact_rej_timewindow_max']
         if dataType == 'VHDR':
-            raw = mne.io.read_raw_brainvision(f"{fileName}.vhdr", eog=['VEOG', 'HEOG'], preload=True)
+            raw = mne.io.read_raw_brainvision(f'{fileName}.vhdr', eog=['VEOG', 'HEOG'], preload=True)
             raw.set_montage('easycap-M1', verbose=True)
             events, event_id = mne.events_from_annotations(raw, verbose=False)
             TMScode = 1128
@@ -6934,7 +6934,7 @@ def run_ica_continuum_pipeline(raw, events, json_data, experiment_dir, sub):
         basicPlots(
             epochs_cont,
             json_data, experiment_dir, sub, 
-            key=f"epochs_continumm_tr{ica_threshold_uv}",
+            key=f'epochs_continumm_tr{ica_threshold_uv}',
             subPath='1.basic'
         )
         print("✅ ICA on continuum complete.")
@@ -9404,7 +9404,7 @@ def clean_trials_channels_old_20260416(raw, events, json_data, experiment_dir, s
     temp_epochs = temp_epochs.set_eeg_reference('average')
 
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
 
 
@@ -9482,7 +9482,7 @@ def clean_trials_channels_20260415(raw, events, json_data, experiment_dir, sub, 
     temp_epochs = temp_epochs.set_eeg_reference('average')
 
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
 
     return temp_epochs, json_data
@@ -9570,7 +9570,7 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
                 doDetrendOnlyOffsetChans=json_data['do_detrend_onlyOffsetChans']
             )
 
-        json_data[f"detrend_{json_data['detrend_type']}_pars"] = [
+        json_data[f'detrend_{json_data["detrend_type"]}_pars'] = [
             json_data['detrend_typeOffsetRise'],
             json_data['detrend_typeOffsetDecay']
         ]
@@ -9580,7 +9580,7 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
         computeSlopesPlot(
             df_slopes_detrended,
             json_data, experiment_dir, sub,
-            saveNote=f"ALL-DET_fit{json_data['detrend_fitConstraint']}",
+            saveNote=f'ALL-DET_fit{json_data["detrend_fitConstraint"]}',
             subPath='2.detrend',
             sharex=True
         )
@@ -9588,10 +9588,10 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
         if json_data['sourceData']!='SIMS':
             detrendedEpochs, json_data = notch_filter_offset_chans(detrendedEpochs, json_data)
             post_label = f"fit{json_data['detrend_fitConstraint']}"
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f"{post_label}", subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='2.detrend', show=False)
         else:
             post_label = f"fit{json_data['detrend_fitConstraint']}"
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f"{post_label}", subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'{post_label}', subPath='2.detrend', show=False)
 
         
     # === CASE 2: detrend disattivato ===
@@ -9615,10 +9615,10 @@ def run_detrend_pipeline(epochs, json_data, sub, experiment_dir, do_plot_variabi
 
             order = json_data['detrend_noWindowedOrder']
             detrendedEpochs = detrendedEpochs.apply_function(lambda x: nonlinear_detrend(x, order=order))
-            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f"overallPolyOrder{order}", subPath='2.detrend', show=False)
+            basicPlots(detrendedEpochs, json_data, experiment_dir, sub, key=f'overallPolyOrder{order}', subPath='2.detrend', show=False)
 
     # === Salvataggio ===
-    pkl_path = Path(experiment_dir) / '7.pkls' / f"{sub}_detrendedEpochs.pkl"
+    pkl_path = Path(experiment_dir) / '7.pkls' / f'{sub}_detrendedEpochs.pkl'
     with open(pkl_path, 'wb') as f:
         pickle.dump(detrendedEpochs, f)
 
@@ -9842,7 +9842,7 @@ def analyze_offset_times(epochs, json_data, experiment_dir, sub, do_plot_variabi
     json_data['detrend_stdTimeWindowOffset'] = round(std_offset, 4)
 
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4)
 
 
@@ -9887,19 +9887,19 @@ def check_detrend_need(epochs, json_data, experiment_dir, sub):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 17))
     for ax, title, mask in zip(
         [ax1, ax2],
-        ['All Channels', f"offsetChans Channels: {json_data['offsetChans']}"],
+        ['All Channels', f'offsetChans Channels: {json_data["offsetChans"]}'],
         [df['chan'].isin(df['chan']), df['chan'].isin(json_data['offsetChans'])]
     ):
         hist_values, bin_edges = np.histogram(df[mask]['toffsetmax'], bins=15)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         ax.bar(bin_centers, hist_values, width=np.diff(bin_edges), alpha=0.3, edgecolor='black')
-        ax.axvline(json_data['detrend_modeTimeWindowOffset'], color='purple', linestyle='-.', linewidth=3, label=f"Mode {json_data['detrend_modeTimeWindowOffset']:.4f}")
+        ax.axvline(json_data['detrend_modeTimeWindowOffset'], color='purple', linestyle='-.', linewidth=3, label=f'Mode {json_data['detrend_modeTimeWindowOffset']:.4f}')
         ax.axvline(json_data['detrend_minTimeWindowOffset'], color='red', linestyle='--', linewidth=3, label='Min Detrend')
         ax.axvline(json_data['detrend_maxTimeWindowOffset'], color='red', linestyle='--', linewidth=3, label='Max Detrend')
         ax.axvspan(json_data['pulse_artifact_rej_timewindow_min'],
                    json_data['pulse_artifact_rej_timewindow_max'],
                    color='k', alpha=0.3, label='Pulse Artifact Window')
-        ax.set_title(f"Histogram of toffsetmax — {title}", fontweight='bold')
+        ax.set_title(f'Histogram of toffsetmax — {title}', fontweight='bold')
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Frequency')
         #ax.set_xlim(json_data['detrend_minTimeWindowOffset'], json_data['detrend_maxTimeWindowOffset'])
@@ -9917,7 +9917,7 @@ def check_detrend_need(epochs, json_data, experiment_dir, sub):
     print(f"   • do_detrend = {json_data['do_detrend']}\n")
 
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
         
     # === Salvataggio CSV dei risultati ===
@@ -10131,9 +10131,9 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
     json_data['feat_step_energy'] = tep_energy
     json_data['feat_step_integral'] = tep_integral
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_parsjsontxt", 'w') as txt_file:
+    with open(Path(experiment_dir) / f'{sub}_parsjsontxt', 'w') as txt_file:
         for key, value in sorted(json_data.items()):
-            txt_file.write(f"{key}: {value}\n")
+            txt_file.write(f'{key}: {value}\n')
 
     # 2
     corr_matrix = np.corrcoef(postICA_final.average().get_data())
@@ -10145,7 +10145,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1, 
                 linewidths=0.5, cbar=True)
     plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix.png")
+    plt.savefig(f'{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix.png')
     plt.close()
     
     # 3    
@@ -10160,12 +10160,12 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1, 
                 linewidths=0.5, cbar=True)
     plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix_seed.png")
+    plt.savefig(f'{experiment_dir}\\5.final\\FE\\{sub}_FE_corrMatrix_seed.png')
     plt.close()
 
     # 4
     plt.figure(figsize=(FIGSIZE))
-    plt.plot(postICA_final.times, postICA_final.average().get_data()[seed_indices, :].T , label=f"seed chans {json_data['seedChans']}", c='r')
+    plt.plot(postICA_final.times, postICA_final.average().get_data()[seed_indices, :].T , label=f'seed chans {json_data['seedChans']}', c='r')
     plt.plot(postICA_final.times, json_data['feats_step'], label='average TEP', linewidth=10)
     plt.xlabel("Time (ms)")
     plt.ylabel('Amplitude (µV) Seed TEP')
@@ -10173,7 +10173,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
     plt.grid(False)
     plt.title('Average Seed TEP')
     plt.tight_layout()
-    plt.savefig(f"{experiment_dir}\\5.final\\FE\\{sub}_FE_STEP.png")
+    plt.savefig(f'{experiment_dir}\\5.final\\FE\\{sub}_FE_STEP.png')
     plt.close()
 
     seed_indices = [postICA_final.ch_names.index(chan) for chan in json_data["seedChans"] if chan in postICA_final.ch_names]
@@ -10187,7 +10187,7 @@ def computeFeatExtraction(postICA_final, json_data, experiment_dir, sub):
         selected_peaks
     
     json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
         
     return json_data
@@ -10232,9 +10232,9 @@ def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
     json_data['feat_step_fooofExponent'] = fooof_exponent
 
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as txt_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as txt_file:
         for key, value in sorted(json_data.items()):
-            txt_file.write(f"{key}: {value}\n")
+            txt_file.write(f'{key}: {value}\n')
 
     # 2 - Correlation matrix full
     corr_matrix = np.corrcoef(postICA_final.average().get_data())
@@ -10246,7 +10246,7 @@ def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1,
                 linewidths=0.5, cbar=True)
     plt.title("Lower Triangular Correlation Matrix (Without Diagonal)")
-    plt.savefig(f"{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix.png")
+    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix.png')
     plt.close()
 
     # 3 - Correlation matrix seed vs all
@@ -10258,7 +10258,7 @@ def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
                 vmin=-1, vmax=1,
                 linewidths=0.5, cbar=True)
     plt.title("Seed vs All Correlation Matrix")
-    plt.savefig(f"{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix_seed.png")
+    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_corrMatrix_seed.png')
     plt.close()
 
     # 4 - Plot TEP signal
@@ -10271,7 +10271,7 @@ def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
     plt.grid(False)
     plt.title('Average Seed TEP')
     plt.tight_layout()
-    plt.savefig(f"{experiment_dir}/5.Extra/FE/{sub}_FE_STEP.png")
+    plt.savefig(f'{experiment_dir}/5.Extra/FE/{sub}_FE_STEP.png')
     plt.close()
 
     # 5 - Peak selection
@@ -10302,7 +10302,7 @@ def computeFeatExtraction_v2(postICA_final, json_data, experiment_dir, sub):
     json_data['feat_step_maxPLV_seed'] = float(np.max(plv_seed_all))
 
     json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data_clean, json_file, indent=4)
 
     return json_data
@@ -11755,7 +11755,7 @@ def selectTEPfeat(EPOCH,  json_data, experiment_dir, sub, seed=['Cz', 'Fz']):
         for signal, ch_name, color in zip(signals, ch_names, colors):
             ax.plot(times, signal * 1e6, label=ch_name, color=color, alpha=0.8, linewidth=5)
     else:
-        ax.plot(times, signals * 1e6, label=f"average seed of {seed}", color='k', alpha=0.8, linewidth=5)
+        ax.plot(times, signals * 1e6, label=f'average seed of {seed}', color='k', alpha=0.8, linewidth=5)
 
     ax.axvline(0, color='red', linestyle='--')
     ax.set_xlabel("Time (ms)")
@@ -11772,7 +11772,7 @@ def selectTEPfeat(EPOCH,  json_data, experiment_dir, sub, seed=['Cz', 'Fz']):
 
     json_data['feat_tep_manual'] = selected_peaks
     json_data_clean = make_json_serializable(json_data)
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data_clean, json_file, indent=4, sort_keys=True)
 
 def set_plot_params(fontsize=16):
@@ -11922,12 +11922,12 @@ def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
 
     if initial_excluded:
         fig1 = ica.plot_components(picks=initial_excluded, show_names=False, show=False)
-        fig1.savefig(save_dir / f"{sub}_AUTO_excluded_ICAs.png")
+        fig1.savefig(save_dir / f'{sub}_AUTO_excluded_ICAs.png')
         plt.close(fig1)
 
     if initial_remaining:
         fig2 = ica.plot_components(picks=initial_remaining, show_names=False, show=False)
-        fig2.savefig(save_dir / f"{sub}_AUTO_included_ICAs.png")
+        fig2.savefig(save_dir / f'{sub}_AUTO_included_ICAs.png')
         plt.close(fig2)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -11955,14 +11955,14 @@ def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
         threshold,
         color='r',
         linestyle='--',
-        label=f"Threshold ({threshold_percentile}° percentile)"
+        label=f'Threshold ({threshold_percentile}° percentile)'
     )
 
     ax.set_xlabel("ICA Component")
     ax.set_ylabel("Eigenvalue")
     ax.set_title(f"Eigenvalues of ICA Components")
     ax.legend()
-    fig.savefig(save_dir / f"{sub}_eigenvalueDist.png")
+    fig.savefig(save_dir / f'{sub}_eigenvalueDist.png')
     plt.close(fig)
 
     components_dir = save_dir / 'components'
@@ -12019,15 +12019,15 @@ def run_ica_filtering_v3(EPOCHS, json_data, experiment_dir, sub,
 
     if final_excluded:
         fig3 = ica.plot_components(picks=final_excluded, show_names=False, show=False)
-        fig3.savefig(save_dir / f"{sub}_FINAL_excluded_ICAs.png")
+        fig3.savefig(save_dir / f'{sub}_FINAL_excluded_ICAs.png')
         plt.close(fig3)
 
     if final_remaining:
         fig4 = ica.plot_components(picks=final_remaining, show_names=False, show=False)
-        fig4.savefig(save_dir / f"{sub}_FINAL_included_ICAs.png")
+        fig4.savefig(save_dir / f'{sub}_FINAL_included_ICAs.png')
         plt.close(fig4)
 
-    with open(save_dir / f"{sub}_ICA_selection_summary.json", 'w') as f:
+    with open(save_dir / f'{sub}_ICA_selection_summary.json', 'w') as f:
         json.dump({
             "auto_excluded": json_data["ICA_autoExcludedComponents"],
             "low_eigen_excluded": json_data["ICA_lowEigenExcludedComponents"],
@@ -12215,12 +12215,12 @@ def run_ica_filtering_v3_old_20260416(EPOCHS, json_data, experiment_dir, sub,
 
     if excluded_components:
         fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-        fig1.savefig(os.path.join(experiment_dir, subPath, f"{sub}_excluded_ICAs.png"))
+        fig1.savefig(os.path.join(experiment_dir, subPath, f'{sub}_excluded_ICAs.png'))
         plt.close(fig1)
 
     if remaining_components:
         fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-        fig2.savefig(os.path.join(experiment_dir, subPath, f"{sub}_included_ICAs.png"))
+        fig2.savefig(os.path.join(experiment_dir, subPath, f'{sub}_included_ICAs.png'))
         plt.close(fig2)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -12228,12 +12228,12 @@ def run_ica_filtering_v3_old_20260416(EPOCHS, json_data, experiment_dir, sub,
     below_threshold = np.where(eigenvalues < threshold)[0]
     ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
     ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f"Threshold ({threshold_percentile}° percentile)")
+    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
     ax.set_xlabel("ICA Component")
     ax.set_ylabel("Eigenvalue")
     ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
     ax.legend()
-    fig.savefig(os.path.join(experiment_dir, subPath, f"{sub}_eigenvalueDist.png"))
+    fig.savefig(os.path.join(experiment_dir, subPath, f'{sub}_eigenvalueDist.png'))
     plt.close(fig)
 
     # === SALVA COMPONENTI ICA SINGOLE CON TAG ===
@@ -12331,7 +12331,7 @@ def plot_ersp(postICA_final, channel=['Cz', 'Fx'], subDir='4.postICA', saveNote=
         for i, FEAT in enumerate(raw.ch_names):
             print(FEAT)
             ersp, freqs = tmspath_utils_adj.plot_ersp(postICA_final, FEAT, n_cycle=2, show=False, ax=ax[i])
-        fig.savefig(f"{experiment_dir}\\{subDir}\\{sub}_ERSP_{saveNote}.png")
+        fig.savefig(f'{experiment_dir}\\{subDir}\\{sub}_ERSP_{saveNote}.png')
 
 def plot_topomap(postICA_final, 
                  json_data, experiment_dir, sub,
@@ -12507,22 +12507,22 @@ def run_ica_filtering(EPOCHS, n_components=None, manualCheck=True, threshold_per
     all_components = set(np.arange(ica.get_components().shape[1]))
     remaining_components = list(all_components - set(excluded_components))
     fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-    fig1.savefig(f"{experiment_dir}\\{subPath}\\{sub}_excluded_ICAs_{saveNote}.png")
+    fig1.savefig(f'{experiment_dir}\\{subPath}\\{sub}_excluded_ICAs_{saveNote}.png')
     plt.close()
     fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-    fig2.savefig(f"{experiment_dir}\\{subPath}\\{sub}_included_ICAs_{saveNote}.png")
+    fig2.savefig(f'{experiment_dir}\\{subPath}\\{sub}_included_ICAs_{saveNote}.png')
     plt.close()
     fig, ax = plt.subplots(figsize=(10, 5))
     above_threshold = np.where(eigenvalues >= threshold)[0]  # Indici sopra soglia
     below_threshold = np.where(eigenvalues < threshold)[0]   # Indici sotto soglia
     ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
     ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f"Threshold ({threshold_percentile}° percentile)")
+    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
     ax.set_xlabel("ICA Component")
     ax.set_ylabel("Eigenvalue")
     ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
     ax.legend()
-    fig.savefig(f"{experiment_dir}\\{subPath}\\{sub}_eigenvalueDist_{saveNote}.png")
+    fig.savefig(f'{experiment_dir}\\{subPath}\\{sub}_eigenvalueDist_{saveNote}.png')
     plt.close()
     if manualCheck: 
         ica = tmspath_utils_adj.ICApp(ica, postICA_raw)
@@ -12580,11 +12580,11 @@ def run_ica_filtering_v2(EPOCHS, n_components=None, manualCheck=True, threshold_
     remaining_components = list(all_components - set(excluded_components))
 
     fig1 = ica.plot_components(picks=excluded_components, show_names=False, show=False)
-    fig1.savefig(os.path.join(experiment_dir, subPath, f"{sub}_excluded_ICAs_{saveNote}.png"))
+    fig1.savefig(os.path.join(experiment_dir, subPath, f'{sub}_excluded_ICAs_{saveNote}.png'))
     plt.close()
 
     fig2 = ica.plot_components(picks=remaining_components, show_names=False, show=False)
-    fig2.savefig(os.path.join(experiment_dir, subPath, f"{sub}_included_ICAs_{saveNote}.png"))
+    fig2.savefig(os.path.join(experiment_dir, subPath, f'{sub}_included_ICAs_{saveNote}.png'))
     plt.close()
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -12592,12 +12592,12 @@ def run_ica_filtering_v2(EPOCHS, n_components=None, manualCheck=True, threshold_
     below_threshold = np.where(eigenvalues < threshold)[0]
     ax.plot(below_threshold, eigenvalues[below_threshold], marker='o', linestyle='-', color='black', label='Eigenvalues')
     ax.scatter(above_threshold, eigenvalues[above_threshold], color='red', label='Above Threshold', zorder=3)
-    ax.axhline(threshold, color='r', linestyle='--', label=f"Threshold ({threshold_percentile}° percentile)")
+    ax.axhline(threshold, color='r', linestyle='--', label=f'Threshold ({threshold_percentile}° percentile)')
     ax.set_xlabel("ICA Component")
     ax.set_ylabel("Eigenvalue")
     ax.set_title(f"Eigenvalues of ICA Components (Above Threshold: {len(above_threshold)})")
     ax.legend()
-    fig.savefig(os.path.join(experiment_dir, subPath, f"{sub}_eigenvalueDist_{saveNote}.png"))
+    fig.savefig(os.path.join(experiment_dir, subPath, f'{sub}_eigenvalueDist_{saveNote}.png'))
     plt.close()
 
     # 6. Controllo manuale finale
@@ -12618,7 +12618,7 @@ def run_ica_filtering_v2(EPOCHS, n_components=None, manualCheck=True, threshold_
 
 def run_ica_artist_ext_only(EPOCHS, n_components=None, ext_threshold_uv=30, manualCheck=True, subPath='4.postICA', saveNote='postICA'):
     import os
-    os.makedirs(f"{experiment_dir}\\{subPath}", exist_ok=True)
+    os.makedirs(f'{experiment_dir}\\{subPath}', exist_ok=True)
 
     # ICA
     ica = mne.preprocessing.ICA(n_components=n_components,
@@ -12674,7 +12674,7 @@ def run_ica_artist_tms_events(raw, events, n_components=None,
     import numpy as np
     import mne
 
-    os.makedirs(f"{experiment_dir}\\{subPath}", exist_ok=True)
+    os.makedirs(f'{experiment_dir}\\{subPath}', exist_ok=True)
 
     sfreq = raw.info['sfreq']
     n_samples_window = int(window_ms / 1000 * sfreq)
@@ -12821,10 +12821,10 @@ def plot_customTEP(EPOCHS, subDir, key, FIGSIZE):
     ax.set_xlabel("Time (s)", fontweight='bold')
     ax.set_ylabel("Amplitude (μV)", fontweight='bold')
     ax.tick_params(axis='both', which='major')
-    ax.set_title(f"{sub} - {key}")
+    ax.set_title(f'{sub} - {key}')
     ax.legend(loc='upper right', frameon=True, shadow=True)
     #fig.tight_layout()
-    fig.savefig(f"{experiment_dir}\\{subPath}\\butterflyPaper_{key}.png")
+    fig.savefig(f'{experiment_dir}\\{subPath}\\butterflyPaper_{key}.png')
     plt.close(fig)
 
     """
@@ -12896,9 +12896,9 @@ def runICA(detrendedEpochs):
     print(n_components)
     json_data['n_components'] = n_components
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as txt_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as txt_file:
         for key, value in sorted(json_data.items()):
-            txt_file.write(f"{key}: {value}\n")
+            txt_file.write(f'{key}: {value}\n')
     
     # set ICA parameters
     ica=mne.preprocessing.ICA(n_components=n_components,
@@ -12962,7 +12962,7 @@ def extract_psd_features(epochs, note, experiment_dir, json_data):
         # Plot limitato al freq_range
         figp = fm.plot(freq_range=freq_range, 
                 save_fig=True,
-                file_name=f"chan_{ch_name}_{note}",
+                file_name=f'chan_{ch_name}_{note}',
                 file_path=save_dir)
         plt.close()
 
@@ -13054,7 +13054,7 @@ def save_bad_epochs_and_channels(info_string, experiment_dir, sub, json_data):
     json_data['bad_trials']=bad_epochs
     
     # Salva parametri
-    with open(Path(experiment_dir) / f"{sub}_pars.json", 'w') as json_file:
+    with open(Path(experiment_dir) / f'{sub}_pars.json', 'w') as json_file:
             json.dump(json_data, json_file, indent=4, sort_keys=True)
 
 def plotTrialTepVariability(epochs,json_data,experiment_dir,sub,
@@ -13161,7 +13161,7 @@ def computeTimeMasks(epochs, chan, trial, json_data, do_plot=False, offset=0.20,
         plt.figure(figsize=(11,7))
         plt.plot(t,sigAll,label='signal (all)')
         plt.plot(t[idx_temp],sig,label='signal (temp window)')
-        plt.scatter(t_peak,sigAll[i_peak],s=60,label=f"peak @ {t_peak:.4f}s")
+        plt.scatter(t_peak,sigAll[i_peak],s=60,label=f'peak @ {t_peak:.4f}s')
         plt.axvline(x=t_min_off,linestyle='--',label=f"minTimeWindowOffset={t_min_off}")
         plt.axvline(x=t_max_off,linestyle='--',label=f"maxTimeWindowOffset={t_max_off}")
         plt.title(plot_title or f"chan={chan}, trial={trial}")
@@ -13245,7 +13245,7 @@ def computeTimeMasks_old16102025(epochs, chan, trial, json_data, do_plot=False, 
         plt.figure(figsize=(11, 7))
         plt.plot(t, sigAll, label='signal (all)')
         plt.plot(t[maskTempOffset], sig, label='signal (temp window)')
-        plt.scatter(t_peak, sig[tMaxOffsetIndex], s=60, label=f"peak @ {t_peak:.4f}s")
+        plt.scatter(t_peak, sig[tMaxOffsetIndex], s=60, label=f'peak @ {t_peak:.4f}s')
         plt.axvline(x=t_min_off, linestyle='--', label=f"minTimeWindowOffset={t_min_off}")
         plt.axvline(x=t_max_off, linestyle='--', label=f"maxTimeWindowOffset={t_max_off}")
         plt.title(plot_title or f"chan={chan}, trial={trial}")
@@ -13298,12 +13298,12 @@ def computeTimeMasks_old15102025(epochs, chan, trial, json_data, do_plot=False, 
         plt.figure(figsize=(13, 11))
         plt.plot(epochs.times[tempMaskOffset], sig)
         plt.plot(epochs.times, sigAll)
-        plt.title(f"{sub}-{epochs.ch_names[chan]}-trial{trial}")
+        plt.title(f'{sub}-{epochs.ch_names[chan]}-trial{trial}')
         plt.scatter(epochs.times[tempMaskOffset][tMaxOffsetIndex], sig[tMaxOffsetIndex], c='r', 
-                    label=f"peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}")
-        plt.axvline(x=offset, label=f"maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}")
+                    label=f'peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}')
+        plt.axvline(x=offset, label=f'maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}')
         plt.legend(loc='upper right')
-        plt.savefig(f"{experiment_dir}/2.detrend/test_maskTest_{sub}_{chan}_{trial}.png")
+        plt.savefig(f'{experiment_dir}/2.detrend/test_maskTest_{sub}_{chan}_{trial}.png')
         plt.close()
         
     maskOffset = np.logical_and(epochs.times>=json_data['detrend_minTimeWindowOffset'], 
@@ -13346,12 +13346,12 @@ def computeTimeMasks_old(epochs, chan, trial, do_plot=False, offset=0.20):
         plt.figure(figsize=(13, 11))
         plt.plot(epochs.times[tempMaskOffset], sig)
         plt.plot(epochs.times, sigAll)
-        plt.title(f"{sub}-{epochs.ch_names[chan]}-trial{trial}")
+        plt.title(f'{sub}-{epochs.ch_names[chan]}-trial{trial}')
         plt.scatter(epochs.times[tempMaskOffset][tMaxOffsetIndex], sig[tMaxOffsetIndex], c='r', 
-                    label=f"peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}")
-        plt.axvline(x=offset, label=f"maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}")
+                    label=f'peak point at {epochs.times[tempMaskOffset][tMaxOffsetIndex]}')
+        plt.axvline(x=offset, label=f'maxTimeWindowOffset={json_data['detrend_maxTimeWindowOffset']}')
         plt.legend(loc='upper right')
-        plt.savefig(f"{experiment_dir}/2.detrend/test/maskTest_{sub}_{chan}_{trial}.png")
+        plt.savefig(f'{experiment_dir}/2.detrend/test/maskTest_{sub}_{chan}_{trial}.png')
         plt.close()
         
     maskOffset = np.logical_and(epochs.times>=json_data['detrend_minTimeWindowOffset'], 
@@ -13362,7 +13362,7 @@ def computeTimeMasks_old(epochs, chan, trial, do_plot=False, offset=0.20):
 
     return maskPreOffset, maskOffset, maskPostOffset
 
-def computeSlopes_v4(epochs, json_data, experiment_dir, sub, saveNote=f"plotTrialTepVariability"):
+def computeSlopes_v4(epochs, json_data, experiment_dir, sub, saveNote=f'plotTrialTepVariability'):
     """
     Compute slopes of linear regressions for EEG data across time windows and trials.
     
@@ -13441,7 +13441,7 @@ def computeSlopes_v4(epochs, json_data, experiment_dir, sub, saveNote=f"plotTria
     return df_slopes
 
     
-def computeSlopes_v4_old(epochs, json_data, experiment_dir, sub, saveNote=f"plotTrialTepVariability"):
+def computeSlopes_v4_old(epochs, json_data, experiment_dir, sub, saveNote=f'plotTrialTepVariability'):
     """
     Compute slopes of linear regressions for EEG data across time windows and trials.
     
@@ -13541,7 +13541,7 @@ def computeSlopesPlot_v3(df_slopes, sub,
 
     # Plot swarm/pointplot
     fig, ax = plt.subplots(1, 3, figsize=(15, 19), sharex=sharex, sharey=True)
-    fig.suptitle(f"{saveNote} - N° Trials: {ntrial}")
+    fig.suptitle(f'{saveNote} - N° Trials: {ntrial}')
 
     for idx, label in enumerate(timeMaskLabels):
         data_subset = df_slopes[df_slopes['id_twindow'] == label]
@@ -13587,7 +13587,7 @@ def computeSlopesPlot_v3(df_slopes, sub,
 
 
     # Salva plot swarm/pointplot
-    out_path = os.path.join(experiment_dir, subPath, f"{VAR}_{saveNote}.png")
+    out_path = os.path.join(experiment_dir, subPath, f'{VAR}_{saveNote}.png')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
@@ -13604,8 +13604,8 @@ def computeSlopesPlot_v3(df_slopes, sub,
     plt.ylim(0, 0.75)
 
     seed_list = json_data["seedChans"] if json_data and "seedChans" in json_data else "ALL"
-    plt.title(f"{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={seed_list}")
-    histo_path = os.path.join(experiment_dir, subPath, f"histo_{VAR}_{saveNote}.png")
+    plt.title(f'{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={seed_list}')
+    histo_path = os.path.join(experiment_dir, subPath, f'histo_{VAR}_{saveNote}.png')
     plt.savefig(histo_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -13644,7 +13644,7 @@ def computeSlopesPlot_v2(df_slopes,
 
     # Plot a 3 pannelli
     fig, ax = plt.subplots(1, 3, figsize=(15, 19), sharex=sharex, sharey=True)
-    fig.suptitle(f"{saveNote} - N° Trials: {ntrial}")
+    fig.suptitle(f'{saveNote} - N° Trials: {ntrial}')
 
     for idx, label in enumerate(timeMaskLabels):
         data_subset = df_slopes[df_slopes['id_twindow'] == label]
@@ -13679,7 +13679,7 @@ def computeSlopesPlot_v2(df_slopes,
             outlier_channels[label] = [(chan, round(z_scores[chan], 2)) for chan in outliers.index]
 
     # Salvataggio del plot swarm+pointplot
-    out_path = os.path.join(experiment_dir, subPath, f"{VAR}_{saveNote}.png")
+    out_path = os.path.join(experiment_dir, subPath, f'{VAR}_{saveNote}.png')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
@@ -13697,9 +13697,9 @@ def computeSlopesPlot_v2(df_slopes,
 
     p_text = "p<0.05" if p_value < 0.05 else "p=ns"
     seed_list = json_data["seedChans"] if json_data and "seedChans" in json_data else "ALL"
-    plt.title(f"{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={seed_list}")
+    plt.title(f'{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={seed_list}')
 
-    histo_path = os.path.join(experiment_dir, subPath, f"histo_{VAR}_{saveNote}.png")
+    histo_path = os.path.join(experiment_dir, subPath, f'histo_{VAR}_{saveNote}.png')
     plt.savefig(histo_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -13727,7 +13727,7 @@ def computeSlopesPlot(df_slopes,
 
     # Plot dei pointplot per ogni timeMaskLabel con ANOVA p-value nei titoli
     fig, ax = plt.subplots(1, 3, figsize=(15, 19), sharex=sharex, sharey=True)
-    fig.suptitle(f"{saveNote} - N° Trials: {ntrial}")
+    fig.suptitle(f'{saveNote} - N° Trials: {ntrial}')
 
     for idx, label in enumerate(timeMaskLabels):
         data_subset = df_slopes[df_slopes['id_twindow'] == label]
@@ -13760,13 +13760,13 @@ def computeSlopesPlot(df_slopes,
         ax[idx].set_title(f"{label}", color=title_color)
         ax[idx].set_xlabel(VAR)
         ax[idx].set_ylabel('Channels')
-        out_path = os.path.join(experiment_dir, subPath, f"{VAR}_{saveNote}_{label}.csv")
+        out_path = os.path.join(experiment_dir, subPath, f'{VAR}_{saveNote}_{label}.csv')
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         data_subset.to_csv(out_path, index=False)
 
 
     # Salvataggio del primo plot
-    fig.savefig(f"{experiment_dir}\\{subPath}\\{VAR}_{saveNote}.png")
+    fig.savefig(f'{experiment_dir}\\{subPath}\\{VAR}_{saveNote}.png')
     plt.close(fig)
 
     # Seleziona la variabile di interesse
@@ -13782,8 +13782,8 @@ def computeSlopesPlot(df_slopes,
     plt.ylim(0, 0.75)
     #plt.title(f"ANOVA: F={anova_stat:.3f}, p={p_value:.3e} \n {json_data['seedChans']}") #\n {multimodal_text}")
     p_text = "p<0.05" if p_value < 0.05 else "p=ns"
-    plt.title(f"{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={json_data['seedChans']}")
-    plt.savefig(f"{experiment_dir}\\{subPath}\\histo_{VAR}_{saveNote}.png", dpi=300, bbox_inches='tight')
+    plt.title(f'{saveNote} - N° Trials: {ntrial} \n ANOVA: F={anova_stat:.3f}, p={p_value:.3f} \n seedChans={json_data['seedChans']}')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\histo_{VAR}_{saveNote}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
     print('p_value', p_value, 'F', anova_stat)
@@ -14335,7 +14335,7 @@ def computeDetrend_v6(EPOCHS,
             trend_line_A = np.polyval(poly_coeffs_A, times[timeMask[0]])
             tepA = tep[timeMask[0]].squeeze() - trend_line_A
             mseA = np.mean((tepA) ** 2)
-            OPTPARS_A = f"wind_poly_{json_data['detrend_polOrder_preOffset']}"
+            OPTPARS_A = f'wind_poly_{json_data['detrend_polOrder_preOffset']}'
 
             # --- NOWIND FIT ---
             if typeOffsetRise == typeOffsetDecay and typeOffsetRise.startswith('nowind_'):
@@ -14710,7 +14710,7 @@ def computeDetrend_v6(EPOCHS,
         tabStat,
         columns=['chan', 'epoch_idx', 'mseA', 'mseB', 'mseC', 'OPTPARS_A', 'OPTPARS_B', 'OPTPARS_C']
     )
-    tabStat_path = os.path.join(experiment_dir, '2.detrend', f"tabStatDetrend_{typeOffsetDecay}.csv")
+    tabStat_path = os.path.join(experiment_dir, '2.detrend', f'tabStatDetrend_{typeOffsetDecay}.csv')
     df_tabStat.to_csv(tabStat_path, index=False)
     print(f"[INFO] Salvato tabStat in: {tabStat_path}")
 
@@ -14742,13 +14742,13 @@ def plot_detrend_example_v3(sub,
     min_offset_time = times[timeMask[1]].min()
     max_offset_time = times[timeMask[1]].max()
     title = (
-        f"{sub} | {chan} | epoch={epoch_idx} \n fitConstrain={fitConstraint} \n "
+        f'{sub} | {chan} | epoch={epoch_idx} \n fitConstrain={fitConstraint} \n '
 #        f'orderPre={orderPreOffset} | orderArt={orderOffset} | orderPost={orderPostOffset_temp}\n'
-        f"Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f} \n"
-        f"typeOffsetRise={typeOffsetRise} with pars={OPTPARS_B} \n"
-        f"typeOffsetDecay={typeOffsetDecay} with pars={OPTPARS_C} \n"     
+        f'Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f} \n'
+        f'typeOffsetRise={typeOffsetRise} with pars={OPTPARS_B} \n'
+        f'typeOffsetDecay={typeOffsetDecay} with pars={OPTPARS_C} \n'     
     )
-    filename = f"{sub}_{chan}_{epoch_idx}_{fitConstraint}.png"
+    filename = f'{sub}_{chan}_{epoch_idx}_{fitConstraint}.png'
 
     fig.suptitle(title)
 
@@ -14807,11 +14807,11 @@ def plot_detrend_example(sub, chan, epoch_idx, times, TEP, trend_line_A, trend_l
     # Common title logic
     if detrendMode == 'poly':
         title = (
-            f"{sub} | {chan} | epoch={epoch_idx} \n fitConstrain={fitConstraint} \n "
-            f"orderPre={orderPreOffset} | orderArt={orderOffset} | orderPost={orderPostOffset_temp}\n"
-            f"Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f}"
+            f'{sub} | {chan} | epoch={epoch_idx} \n fitConstrain={fitConstraint} \n '
+            f'orderPre={orderPreOffset} | orderArt={orderOffset} | orderPost={orderPostOffset_temp}\n'
+            f'Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f}'
         )
-        filename = f"{sub}_{chan}_{epoch_idx}_{fitConstraint}_{orderPostOffset_temp}.png"
+        filename = f'{sub}_{chan}_{epoch_idx}_{fitConstraint}_{orderPostOffset_temp}.png'
         
     if detrendMode in ['singleDecay', 'doubleDecay']:
         """
@@ -14823,20 +14823,20 @@ def plot_detrend_example(sub, chan, epoch_idx, times, TEP, trend_line_A, trend_l
         )
         """
         if popt_C is not None:
-            exp_info = f"Art exp={orderOffset} with pars={popt_B}\n"
-            postart_info = f"postArt exp={detrendMode} with pars={popt_C}"
+            exp_info = f'Art exp={orderOffset} with pars={popt_B}\n'
+            postart_info = f'postArt exp={detrendMode} with pars={popt_C}'
         else:
-            exp_info = f"noExp but Lagrange with order={orderOffset}\n"
+            exp_info = f'noExp but Lagrange with order={orderOffset}\n'
             postart_info = 'no postArt exp fit'
         
         title = (
-            f"{sub} | {chan} | epoch={epoch_idx} \n"
-            f"fitConstrain={fitConstraint} \n"
-            f"orderPre={orderPreOffset} | {exp_info}"
-            f"Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f} \n"
-            f"{postart_info}"
+            f'{sub} | {chan} | epoch={epoch_idx} \n'
+            f'fitConstrain={fitConstraint} \n'
+            f'orderPre={orderPreOffset} | {exp_info}'
+            f'Min Offset Time: {min_offset_time:.4f} | Max Offset Time: {max_offset_time:.4f} \n'
+            f'{postart_info}'
         )
-        filename = f"{sub}_detrendExample_{chan}_{epoch_idx}_{fitConstraint}_{detrendMode}.png"
+        filename = f'{sub}_detrendExample_{chan}_{epoch_idx}_{fitConstraint}_{detrendMode}.png'
 
     fig.suptitle(title)
 
@@ -14968,7 +14968,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     sns.pointplot(data=df_neural_params, x='pol_degree', y='slope', ax=ax1, color='b')
     ax1.set_ylabel('exp of 1/f^exp', color='b')
     ax1.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_slope.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\{saveNote}_slope.png', dpi=300, bbox_inches='tight')
     plt.close(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(13, 6))
@@ -14977,7 +14977,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Number of Resonances', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_resonances.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\{saveNote}_resonances.png', dpi=300, bbox_inches='tight')
     plt.close(fig2)
 
     # F and p da PSTATS2
@@ -14999,7 +14999,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_yscale('log')
     ax1.set_xlabel('Polynomial Degree')
     ax1.set_title(f"Estimated Pol Degree (min F)={pol_degree_min_F}")
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_fp.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\{saveNote}_fp.png', dpi=300, bbox_inches='tight')
     plt.close(fig3)
 
     fig4, ax4 = plt.subplots(figsize=(13, 6))
@@ -15008,7 +15008,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Fit Error', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_fitError.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\{saveNote}_fitError.png', dpi=300, bbox_inches='tight')
     plt.close(fig4)
 
     fig5, ax5 = plt.subplots(figsize=(13, 6))
@@ -15017,7 +15017,7 @@ def plot_slope_resonances(PSTATS, PSTATS2, saveNote='pol_degree_estimate', subPa
     ax2.set_title(f"Estimated Pol Degree (min res)={pol_degree_min_resonances}")
     ax2.set_ylabel('Fit Error', color='r')
     ax2.set_xlabel('Polynomial Degree')
-    plt.savefig(f"{experiment_dir}\\{subPath}\\{saveNote}_r2.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f'{experiment_dir}\\{subPath}\\{saveNote}_r2.png', dpi=300, bbox_inches='tight')
     plt.close(fig4)
 
     return df_neural_params, pol_degree_min_resonances, pol_degree_min_F

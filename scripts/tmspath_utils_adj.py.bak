@@ -299,7 +299,7 @@ class ICAWorkerThread(QThread):
             else:
                 ax.plot(self.app.clear_epochs.times, self.app.clear_epochs.average().data.T, linewidth=1.5)
                 ax.set_xlim([self.app.clear_epochs.times[0], self.app.clear_epochs.times[-1]])
-            ax.set_title(f"Dataset ({self.app.clear_var:.2f}%)")
+            ax.set_title(f'Dataset ({self.app.clear_var:.2f}%)')
 
         # Signal with Current ICA Component Removed
         if not self.app.component_is_updated[comp]:
@@ -311,7 +311,7 @@ class ICAWorkerThread(QThread):
             else:
                 ax.plot(new_epochs.times, new_epochs.average().data.T, linewidth=1.5)
                 ax.set_xlim([new_epochs.times[0], new_epochs.times[-1]])
-            ax.set_title(f"Dataset - ICA{str(comp).zfill(3)} ({new_var:.2f}%)")
+            ax.set_title(f'Dataset - ICA{str(comp).zfill(3)} ({new_var:.2f}%)')
         
         self.app.changing_component = None
         self.app.dataset_is_updated[comp] = True
@@ -804,7 +804,7 @@ def plot_gmfp(epochs,channels='all',  ax=None, show=True):
     nchs = len(epochs.ch_names)
     if channels != 'all':
         nchs = len(channels)
-    ax.set_title(f"Global Mean Field Power ({nchs} channels)")
+    ax.set_title(f'Global Mean Field Power ({nchs} channels)')
     if show:
         plt.show()
     else:
@@ -884,7 +884,7 @@ def plot_ersp(epochs, channel,
     small_ax.set_ylim(freqs[0], freqs[-1])
     small_ax.set_yticklabels([])  # Hide y ticks since they're redundant in this context
     small_ax.axis('off')
-    small_ax.text(average_over_times.max(), peak_freq, f"{peak_freq:.2f} Hz")
+    small_ax.text(average_over_times.max(), peak_freq, f'{peak_freq:.2f} Hz')
     if show: plt.show()
     else: plt.close()
     return ersp, freqs
