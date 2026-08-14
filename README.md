@@ -1,3 +1,6 @@
+
+# Queste pipeline fa cagare
+
 # TMSpath Pipeline
 
 TMSpath is a Python pipeline for the preprocessing, analysis, visualization, and feature extraction of transcranial magnetic stimulation combined with electroencephalography data, TMS-EEG, and conventional EEG recordings.
