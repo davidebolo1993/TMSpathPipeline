@@ -41,7 +41,7 @@ from scipy.spatial.distance import euclidean
 from scipy.stats import (
     expon, gamma, laplace, linregress, norm, poisson, rayleigh, t, uniform
 )
-from statsmodels.tsa.arima.model import ARIMA
+# from statsmodels.tsa.arima.model import ARIMA
 import matplotlib
 matplotlib.use('Qt5Agg')  # GUI backend
 import matplotlib.pyplot as plt
@@ -107,7 +107,7 @@ def import_modules():
     # ===============================
     # Import time series analysis
     # ===============================
-    from statsmodels.tsa.arima.model import ARIMA
+    # from statsmodels.tsa.arima.model import ARIMA
     
     # ===============================
     # Import data visualization libraries
@@ -1849,6 +1849,7 @@ def clean_trials_channels(raw, events, json_data, experiment_dir, sub, seedChans
     )
 
     temp_epochs = temp_epochs.pick("eeg")
+    temp_epochs = temp_epochs.set_eeg_reference("average")
 
     n_trials_before = len(temp_epochs)
     all_eeg_chans = list(temp_epochs.ch_names)
