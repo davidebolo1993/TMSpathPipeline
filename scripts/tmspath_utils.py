@@ -1848,7 +1848,7 @@ def clean_trials_channels(raw, events, json_data, experiment_dir, sub, seedChans
         preload=True
     )
 
-    temp_epochs = temp_epochs.pick("eeg")
+    temp_epochs = temp_epochs.set_eeg_reference("average") #v1.0.5
 
     n_trials_before = len(temp_epochs)
     all_eeg_chans = list(temp_epochs.ch_names)
